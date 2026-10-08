@@ -8,12 +8,14 @@ import {
   halfSize,
   identifyPad,
   MAX_PAD_BYTES,
+  entropyId,
   parsePadFile,
   SIDE_NAMES,
+  type PadSource,
   type Side,
 } from '../crypto/pad.ts';
-import { addChat, getChat, updateChat, type ChatRecord } from '../store.ts';
-import { download, formatBytes, h, icon, messagesLeft, sideIcon, toast } from './dom.ts';
+import { addChat, getChat, isEntropyUsed, updateChat, type ChatRecord } from '../store.ts';
+import { download, formatBytes, h, icon, messagesLeft, sideIcon, SOURCE_INFO, sourceChip, toast } from './dom.ts';
 
 // ---------- sheet scaffolding ----------
 
@@ -60,12 +62,13 @@ function sideChip(side: Side) {
   return h('span', { class: 'side-chip', 'data-side': side }, sideIcon(side), SIDE_NAMES[side]);
 }
 
-function fingerprintCard(fp: string) {
+function fingerprintCard(fp: string, source?: PadSource) {
   return h(
     'div',
     { class: 'fp-card glass glass--clear' },
     h('small', null, 'Pad fingerprint'),
     h('div', { class: 'fingerprint fingerprint--big' }, fp),
+    source && h('div', { style: 'margin-top: 10px' }, sourceChip(source)),
   );
 }
 
@@ -85,6 +88,8 @@ const SIZES = [
 export function newPadSheet(onDone: (chatId: string) => void) {
   const sheet = openSheet('Create a pad');
   let size = SIZES[0].bytes;
+  let useHardware = false;
+  let hardware: { bytes: Uint8Array; id: string; name: string } | null = null;
   const name = nameField();
 
   const sizeButtons = SIZES.map((s) =>
@@ -95,7 +100,7 @@ export function newPadSheet(onDone: (chatId: string) => void) {
         'aria-pressed': String(s.bytes === size),
         onclick: () => {
           size = s.bytes;
-          sizeButtons.forEach((b, i) => b.setAttribute('aria-pressed', String(SIZES[i].bytes === size)));
+          sync();
         },
       },
       h('b', null, s.label),
@@ -103,6 +108,48 @@ export function newPadSheet(onDone: (chatId: string) => void) {
     ),
   );
 
+  const sourceButtons = (['csprng', 'mixed'] as const).map((src) =>
+    h(
+      'button',
+      {
+        class: 'choice glass glass--clear glass--interactive',
+        'aria-pressed': String(src === 'csprng'),
+        onclick: () => {
+          useHardware = src === 'mixed';
+          sync();
+        },
+      },
+      sourceChip(src),
+      h('span', null, src === 'mixed' ? 'Hardware + browser' : 'Browser only'),
+    ),
+  );
+
+  // Hardware randomness: raw bytes from a TRNG device, mixed in by XOR.
+  const hwInput = h('input', { type: 'file', class: 'sr-only' });
+  const hwStatus = h('div', { 'aria-live': 'polite' });
+  const hwZone = h(
+    'button',
+    { class: 'dropzone', type: 'button', onclick: () => hwInput.click() },
+    icon('upload'),
+    h('div', null, h('b', null, 'Choose TRNG output'), ' or drop it here'),
+    h('small', null, 'Raw bytes from a hardware random number generator, at least as large as the pad.'),
+  );
+  wireDrop(hwZone, (f) => void loadHardware(f));
+  hwInput.addEventListener('change', () => hwInput.files?.[0] && void loadHardware(hwInput.files[0]));
+  const hwSection = h(
+    'div',
+    { class: 'field', hidden: true },
+    hwZone,
+    hwInput,
+    hwStatus,
+    callout(
+      'info',
+      'For example ', h('code', null, 'head -c 16M /dev/hwrng > trng.bin'), ', or the output of an Infinite Noise, OneRNG or ChaosKey device. ',
+      'Use its whitened output. Each file can only be mixed into one pad.',
+    ),
+  );
+
+  const sourceNote = h('div');
   const generate = h(
     'button',
     { class: 'btn btn--block glass glass--tinted glass--pill glass--interactive', onclick: () => void run() },
@@ -110,22 +157,77 @@ export function newPadSheet(onDone: (chatId: string) => void) {
     'Generate pad',
   );
 
+  function sync() {
+    sourceButtons.forEach((b, i) => b.setAttribute('aria-pressed', String((i === 1) === useHardware)));
+    hwSection.hidden = !useHardware;
+    const limit = useHardware && hardware ? hardware.bytes.length : Infinity;
+    if (size > limit) size = [...SIZES].reverse().find((s) => s.bytes <= limit)?.bytes ?? size;
+    sizeButtons.forEach((b, i) => {
+      b.setAttribute('aria-pressed', String(SIZES[i].bytes === size));
+      b.disabled = SIZES[i].bytes > limit;
+    });
+    generate.disabled = useHardware && (!hardware || size > hardware.bytes.length);
+    sourceNote.replaceChildren(
+      useHardware
+        ? callout('info', h('b', null, 'True random. '), SOURCE_INFO.mixed.detail)
+        : callout('warn', h('b', null, 'Strong, but not provably unbreakable. '), SOURCE_INFO.csprng.detail),
+    );
+  }
+
+  async function loadHardware(file: File) {
+    hardware = null;
+    sync();
+    if (file.size > MAX_PAD_BYTES) {
+      hwStatus.replaceChildren(callout('danger', `That file is over ${formatBytes(MAX_PAD_BYTES)}.`));
+      return;
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.length < SIZES[0].bytes) {
+      hwStatus.replaceChildren(callout('danger', `Need at least ${SIZES[0].label} of hardware randomness; this file is ${formatBytes(bytes.length)}.`));
+      return;
+    }
+    const randomness = checkRandomness(bytes);
+    if (!randomness.ok) {
+      hwStatus.replaceChildren(
+        callout('danger', h('b', null, 'This doesn’t look random. '), 'Use your device’s whitened output, not raw samples. ', randomness.reason ?? ''),
+      );
+      return;
+    }
+    const id = await entropyId(bytes);
+    if (await isEntropyUsed(id)) {
+      hwStatus.replaceChildren(
+        callout('danger', h('b', null, 'Already used. '), 'This file was mixed into another pad on this device. Reusing it would tie the two pads together. Capture fresh output.'),
+      );
+      return;
+    }
+    hardware = { bytes, id, name: file.name };
+    hwStatus.replaceChildren(
+      callout('info', h('b', null, `${formatBytes(bytes.length)} loaded`), ` from ${file.name}. Sizes up to that are available. Delete the file once the pad is made.`),
+    );
+    sync();
+  }
+
   render(
     sheet,
     h('h2', null, 'Create a pad'),
-    h('p', { class: 'lede' }, 'Your browser fills a pad with random bytes. You keep one copy and hand the other to your partner in person.'),
+    h('p', { class: 'lede' }, 'You keep one copy of the pad and hand the other to your partner in person.'),
     name.el,
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Randomness'), h('div', { class: 'choices choices--2' }, ...sourceButtons)),
+    hwSection,
     h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Pad size'), h('div', { class: 'choices' }, ...sizeButtons)),
-    callout('info', 'Each person gets half the pad. Text messages use about 64–128 bytes each, so bigger pads last longer.'),
+    sourceNote,
     h('div', { class: 'sheet-foot' }, generate),
   );
+  sync();
   name.input.focus();
 
   async function run() {
+    const source: PadSource = useHardware ? 'mixed' : 'csprng';
+    if (useHardware && !hardware) return;
     generate.disabled = true;
     generate.lastChild!.textContent = 'Generating…';
     await new Promise((r) => setTimeout(r, 30)); // let the label paint before the CPU-bound work
-    const body = generatePad(size);
+    const body = generatePad(size, useHardware ? hardware!.bytes : undefined);
     const { chatId, fingerprint, writeKey } = await identifyPad(body);
     try {
       await claimChat(chatId, writeKey);
@@ -150,13 +252,29 @@ export function newPadSheet(onDone: (chatId: string) => void) {
       createdAt: now,
       lastActivity: now,
       partnerExported: false,
+      source,
     };
-    await addChat(chat, body);
+    await addChat(chat, body, useHardware ? hardware!.id : undefined);
+    hardware = null; // drop our reference to the raw TRNG bytes
     showHandoff(sheet, chat, body, () => {
       sheet.close();
       onDone(chatId);
     });
   }
+}
+
+function wireDrop(zone: HTMLElement, onFile: (f: File) => void) {
+  zone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    zone.dataset.over = 'true';
+  });
+  zone.addEventListener('dragleave', () => delete zone.dataset.over);
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    delete zone.dataset.over;
+    const file = e.dataTransfer?.files[0];
+    if (file) onFile(file);
+  });
 }
 
 function showHandoff(sheet: Sheet, chat: ChatRecord, body: Uint8Array, onOpen: () => void) {
@@ -172,7 +290,7 @@ function showHandoff(sheet: Sheet, chat: ChatRecord, body: Uint8Array, onOpen: (
       class: 'btn glass glass--pill glass--interactive',
       autofocus: true,
       onclick: async () => {
-        download(encodePadFile(body, partner), `${slug(chat.name)}-${SIDE_NAMES[partner].toLowerCase()}.pad`);
+        download(encodePadFile(body, partner, chat.source ?? 'external'), `${slug(chat.name)}-${SIDE_NAMES[partner].toLowerCase()}.pad`);
         await updateChat(chat.chatId, { partnerExported: true });
         openBtn.disabled = false;
       },
@@ -184,7 +302,7 @@ function showHandoff(sheet: Sheet, chat: ChatRecord, body: Uint8Array, onOpen: (
     sheet,
     h('h2', null, 'Pad ready'),
     h('p', { class: 'lede' }, 'You are ', sideChip(chat.side), '. Your partner’s copy is marked ', sideChip(partner), ' so you never use the same bytes.'),
-    fingerprintCard(chat.fingerprint),
+    fingerprintCard(chat.fingerprint, chat.source),
     callout(
       'warn',
       h('b', null, 'Hand it over in person. '),
@@ -222,17 +340,7 @@ export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOpt
     h('div', null, h('b', null, 'Choose a pad file'), ' or drop it here'),
     h('small', null, 'It stays on this device. Nothing is uploaded.'),
   );
-  zone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    zone.dataset.over = 'true';
-  });
-  zone.addEventListener('dragleave', () => delete zone.dataset.over);
-  zone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    delete zone.dataset.over;
-    const file = e.dataTransfer?.files[0];
-    if (file) void read(file);
-  });
+  wireDrop(zone, (f) => void read(f));
   fileInput.addEventListener('change', () => fileInput.files?.[0] && void read(fileInput.files[0]));
 
   render(
@@ -273,10 +381,10 @@ export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOpt
       onDone(chatId);
       return;
     }
-    confirm(parsed.body, parsed.side, chatId, fingerprint, writeKey, file.name);
+    confirm(parsed.body, parsed.side, parsed.source, chatId, fingerprint, writeKey, file.name);
   }
 
-  function confirm(body: Uint8Array, presetSide: Side | null, chatId: string, fingerprint: string, writeKey: string, filename: string) {
+  function confirm(body: Uint8Array, presetSide: Side | null, source: PadSource, chatId: string, fingerprint: string, writeKey: string, filename: string) {
     let side: Side | null = presetSide;
     const name = nameField(filename.replace(/\.pad$/i, '').replace(/-(sun|moon)$/i, '').replace(/[-_]+/g, ' ').trim());
     const go = h(
@@ -318,8 +426,10 @@ export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOpt
       sheet,
       h('h2', null, 'Check the fingerprint'),
       h('p', { class: 'lede' }, `${formatBytes(body.length)} pad · ${messagesLeft(halfSize(body.length))} messages each way. Compare this with your partner’s screen.`),
-      fingerprintCard(fingerprint),
+      fingerprintCard(fingerprint, source),
       presetSide !== null && h('p', { class: 'lede' }, 'This copy is marked ', sideChip(presetSide), '.'),
+      source === 'external' &&
+        callout('warn', h('b', null, 'Unverified randomness. '), SOURCE_INFO.external.detail),
       h('div', { style: 'height: 12px' }),
       name.el,
       sidePicker,
@@ -362,6 +472,7 @@ export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOpt
             historyFloor: floor,
             createdAt: now,
             lastActivity: now,
+            source,
           },
           body,
         );

@@ -1,3 +1,5 @@
+import type { PadSource } from '../crypto/pad.ts';
+
 // Minimal DOM helpers. Text is always set via textContent; the only
 // innerHTML is the constant icon set below.
 
@@ -137,4 +139,33 @@ export function formatBytes(n: number): string {
 export function messagesLeft(bytes: number): string {
   const n = Math.floor(bytes / 96);
   return n >= 10000 ? `${Math.round(n / 1000)}k` : n.toLocaleString();
+}
+
+export const SOURCE_INFO: Record<PadSource | 'unknown', { label: string; detail: string }> = {
+  mixed: {
+    label: 'True random',
+    detail:
+      'Hardware randomness mixed with your browser’s generator. Messages are provably unbreakable, by any amount of computing, as long as the hardware source is truly random.',
+  },
+  csprng: {
+    label: 'Browser random',
+    detail:
+      'Made with your browser’s cryptographic generator. Very strong, with no known attacks, but its security rests on computational assumptions like any modern cipher. Mix in hardware randomness for a provable guarantee.',
+  },
+  external: {
+    label: 'Unverified',
+    detail:
+      'This file has no padmessage header, so there is no record of how it was made. It is only as strong as its source: true random if it came straight from a hardware generator, worthless if it didn’t.',
+  },
+  unknown: { label: 'Unknown source', detail: 'This pad was loaded before padmessage tracked where randomness came from.' },
+};
+
+export function sourceChip(source: PadSource | undefined) {
+  const key = source ?? 'unknown';
+  return h(
+    'span',
+    { class: 'source-chip', 'data-source': key, title: SOURCE_INFO[key].detail },
+    icon(key === 'mixed' ? 'shield' : key === 'csprng' ? 'lock' : 'alert'),
+    SOURCE_INFO[key].label,
+  );
 }

@@ -2,7 +2,7 @@
 // sent anywhere. Chat metadata is kept apart from pad bytes so listing chats
 // does not load megabytes of key material.
 
-import type { Side } from './crypto/pad.ts';
+import type { PadSource, Side } from './crypto/pad.ts';
 
 export interface ChatRecord {
   chatId: string;
@@ -22,6 +22,8 @@ export interface ChatRecord {
   lastActivity: number;
   /** True once the partner copy of a generated pad has been exported. */
   partnerExported?: boolean;
+  /** Where the pad's randomness came from. Missing on records made before this was tracked. */
+  source?: PadSource;
 }
 
 const DB_NAME = 'padmessage';
@@ -29,11 +31,15 @@ let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
   dbPromise ??= new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
+    const req = indexedDB.open(DB_NAME, 2);
+    req.onupgradeneeded = (e) => {
       const db = req.result;
-      db.createObjectStore('chats', { keyPath: 'chatId' });
-      db.createObjectStore('pads');
+      if (e.oldVersion < 1) {
+        db.createObjectStore('chats', { keyPath: 'chatId' });
+        db.createObjectStore('pads');
+      }
+      // Ids of hardware randomness already mixed into a pad (see entropyId).
+      if (e.oldVersion < 2) db.createObjectStore('entropy');
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -73,12 +79,20 @@ export async function getPad(chatId: string): Promise<Uint8Array | undefined> {
   return buf && new Uint8Array(buf);
 }
 
-export async function addChat(chat: ChatRecord, pad: Uint8Array): Promise<void> {
+export async function isEntropyUsed(id: string): Promise<boolean> {
   const db = await openDb();
-  const tx = db.transaction(['chats', 'pads'], 'readwrite');
-  // add() rather than put(): importing the same pad twice must never reset its offset.
+  return (await request(db.transaction('entropy').objectStore('entropy').count(id))) > 0;
+}
+
+/** `entropyId` marks the hardware randomness mixed into this pad as spent, in the same transaction. */
+export async function addChat(chat: ChatRecord, pad: Uint8Array, entropyId?: string): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(['chats', 'pads', 'entropy'], 'readwrite');
+  // add() rather than put(): importing the same pad twice must never reset its offset,
+  // and a hardware dump already spent fails the whole transaction.
   tx.objectStore('chats').add(chat);
   tx.objectStore('pads').add(pad.slice().buffer, chat.chatId);
+  if (entropyId) tx.objectStore('entropy').add(chat.chatId, entropyId);
   await done(tx);
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { poly1305 } from '@noble/ciphers/_poly1305.js';
 import { costOf, frameText, open, seal, unframeText } from './otp.ts';
-import { checkRandomness, encodePadFile, generatePad, halfSize, identifyPad, parsePadFile } from './pad.ts';
+import { checkRandomness, encodePadFile, entropyId, generatePad, halfSize, identifyPad, parsePadFile } from './pad.ts';
 
 const hex = (s: string) => Uint8Array.from(s.match(/../g)!.map((b) => parseInt(b, 16)));
 
@@ -63,11 +63,13 @@ describe('seal / open', () => {
 describe('pad files', () => {
   it('round-trips the side header without changing identity', async () => {
     const body = generatePad(64 * 1024);
-    const file = encodePadFile(body, 1);
+    const file = encodePadFile(body, 1, 'mixed');
     const parsed = parsePadFile(file);
     expect(parsed.side).toBe(1);
+    expect(parsed.source).toBe('mixed');
     expect(parsed.body).toEqual(body);
-    expect(parsePadFile(body).side).toBeNull();
+    expect(parsePadFile(encodePadFile(body, 0, 'csprng')).source).toBe('csprng');
+    expect(parsePadFile(body)).toMatchObject({ side: null, source: 'external' });
     expect(await identifyPad(parsed.body)).toEqual(await identifyPad(body));
   });
 
@@ -82,5 +84,20 @@ describe('pad files', () => {
     const text = new TextEncoder().encode('the quick brown fox '.repeat(10000));
     expect(checkRandomness(text).ok).toBe(false);
     expect(checkRandomness(generatePad(1024)).ok).toBe(false);
+  });
+
+  it('mixes hardware randomness by XOR and refuses a short source', () => {
+    const hw = generatePad(64 * 1024);
+    const a = generatePad(64 * 1024, hw);
+    const b = generatePad(64 * 1024, hw);
+    // Same hardware input, independent browser output: the pads still differ.
+    expect(a).not.toEqual(b);
+    expect(() => generatePad(64 * 1024, hw.subarray(0, 1000))).toThrow(/smaller/);
+  });
+
+  it('identifies a reused hardware file regardless of how much was used', async () => {
+    const hw = generatePad(256 * 1024);
+    expect(await entropyId(hw)).toBe(await entropyId(hw.subarray(0, 128 * 1024)));
+    expect(await entropyId(hw)).not.toBe(await entropyId(generatePad(256 * 1024)));
   });
 });

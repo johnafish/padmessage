@@ -13,7 +13,8 @@ Requires Node 22.13+ (uses the built-in `node:sqlite`).
 
 ## How it works
 
-- **Pads never leave the device.** They're generated with `crypto.getRandomValues` or loaded from a file, and stored in IndexedDB. "Load pad" reads the file locally. Nothing is uploaded.
+- **Pads never leave the device.** They're generated in the browser or loaded from a file, and stored in IndexedDB. "Load pad" reads the file locally. Nothing is uploaded.
+- **Randomness is labelled honestly.** `crypto.getRandomValues` is a CSPRNG: very strong, but computational. A pad made only from it is not information-theoretically secure. Create a pad can XOR in hardware TRNG output (e.g. `/dev/hwrng`, Infinite Noise, OneRNG), which is at least as random as the better source. Only those pads are labelled **True random**. The source is recorded in the pad header (byte 9), so both copies show the same label. Raw files with no header are **Unverified**. Each hardware dump is fingerprinted (first 64 KiB) and can't be mixed into a second pad on the same device.
 - **Two halves, no collisions.** Side 0 (Sun) encrypts only with the first half of the pad and side 1 (Moon) only with the second. A generated pad marks the partner's copy as Moon in a 16-byte file header. Raw pads, e.g. from a hardware RNG, ask the user to choose a side.
 - **Bytes are burned before use.** `reserve()` in `src/store.ts` advances the offset in an IndexedDB transaction, under a Web Lock, *before* encrypting. A failed send burns those bytes and a retry uses new ones. The offset also never drops below the highest offset the relay has seen for that side, which covers restored or stale devices.
 - **Each message is authenticated.** Format: `[32-byte Poly1305 one-time key | keystream]` from the pad, XOR, then encrypt-then-MAC over chat id, side, offset and ciphertext. That's information-theoretic secrecy plus integrity. Plaintext is padded to 32-byte blocks.

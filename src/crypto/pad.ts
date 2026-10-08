@@ -9,7 +9,8 @@
 // import), or a 16-byte header followed by the pad body:
 //   0..7   magic "PADMSG1\0"
 //   8      side this copy is meant for (0 | 1)
-//   9..15  reserved, zero
+//   9      randomness source: 1 browser CSPRNG, 2 hardware TRNG XOR CSPRNG
+//   10..15 reserved, zero
 // The header is never part of the key material or the pad identity.
 
 export type Side = 0 | 1;
@@ -19,37 +20,69 @@ export const SIDE_NAMES = ['Sun', 'Moon'] as const;
 const MAGIC = new TextEncoder().encode('PADMSG1\0');
 const HEADER_LEN = 16;
 
+/**
+ * Where a pad's bytes came from. Only true randomness gives the one-time
+ * pad its unconditional guarantee; a CSPRNG pad is as strong as the
+ * generator (excellent, but computational).
+ *   csprng   - browser crypto.getRandomValues
+ *   mixed    - hardware TRNG output XORed with the browser CSPRNG: at least
+ *              as random as the better of the two
+ *   external - a raw file from an unknown source; we can't vouch for it
+ */
+export type PadSource = 'csprng' | 'mixed' | 'external';
+
+const SOURCE_BYTES: Record<PadSource, number> = { external: 0, csprng: 1, mixed: 2 };
+
 export const MIN_PAD_BYTES = 64 * 1024;
 export const MAX_PAD_BYTES = 512 * 1024 * 1024;
 
 export interface ParsedPad {
   body: Uint8Array;
   side: Side | null;
+  source: PadSource;
 }
 
 export function parsePadFile(bytes: Uint8Array): ParsedPad {
   const hasHeader = bytes.length > HEADER_LEN && MAGIC.every((b, i) => bytes[i] === b);
-  if (!hasHeader) return { body: bytes, side: null };
+  if (!hasHeader) return { body: bytes, side: null, source: 'external' };
   const side = bytes[8];
   if (side !== 0 && side !== 1) throw new Error('Pad file header names an unknown side.');
-  return { body: bytes.subarray(HEADER_LEN), side };
+  const source = bytes[9] === SOURCE_BYTES.mixed ? 'mixed' : bytes[9] === SOURCE_BYTES.csprng ? 'csprng' : 'external';
+  return { body: bytes.subarray(HEADER_LEN), side, source };
 }
 
-export function encodePadFile(body: Uint8Array, side: Side): Uint8Array {
+export function encodePadFile(body: Uint8Array, side: Side, source: PadSource): Uint8Array {
   const out = new Uint8Array(HEADER_LEN + body.length);
   out.set(MAGIC, 0);
   out[8] = side;
+  out[9] = SOURCE_BYTES[source];
   out.set(body, HEADER_LEN);
   return out;
 }
 
-/** Fill a new pad from the platform CSPRNG (getRandomValues caps at 64 KiB per call). */
-export function generatePad(size: number): Uint8Array {
+/**
+ * Fill a new pad from the platform CSPRNG (getRandomValues caps at 64 KiB per
+ * call), optionally XORed with hardware TRNG output. XOR of independent
+ * sources is at least as unpredictable as the better one, so a weak or
+ * backdoored device can't make the pad worse than the browser alone.
+ */
+export function generatePad(size: number, hardware?: Uint8Array): Uint8Array {
+  if (hardware && hardware.length < size) throw new Error('Hardware randomness is smaller than the pad.');
   const pad = new Uint8Array(size);
   for (let i = 0; i < size; i += 65536) {
     crypto.getRandomValues(pad.subarray(i, Math.min(i + 65536, size)));
   }
+  if (hardware) for (let i = 0; i < size; i++) pad[i] ^= hardware[i];
   return pad;
+}
+
+/**
+ * Remembers hardware dumps already spent, so one is never mixed into two
+ * pads. Mixing always starts at byte 0, so any reuse of a file shares its
+ * first 64 KiB whatever pad size was picked; hashing just that is enough.
+ */
+export async function entropyId(hardware: Uint8Array): Promise<string> {
+  return base64url(await sha256(concat(ascii('padmessage/trng/v1'), hardware.subarray(0, 65536))));
 }
 
 /** Bytes available to each side. An odd trailing byte is never used. */

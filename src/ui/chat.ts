@@ -2,7 +2,7 @@ import { fetchMessages, postMessage, subscribe, type WireMessage } from '../api.
 import { costOf, costOfCiphertext, frameText, MAX_TEXT_CHARS, open, seal, unframeText } from '../crypto/otp.ts';
 import { fromBase64, SIDE_NAMES, toBase64, type Side } from '../crypto/pad.ts';
 import { deleteChat, getChat, getPad, PadExhaustedError, reserve } from '../store.ts';
-import { avatar, formatBytes, h, icon, messagesLeft, sideIcon, toast } from './dom.ts';
+import { avatar, formatBytes, h, icon, messagesLeft, sideIcon, sourceChip, toast } from './dom.ts';
 import { confirmSheet, exportPartnerCopy, renameSheet } from './sheets.ts';
 
 interface Item {
@@ -60,6 +60,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
         'div',
         { class: 'chat-head-sub' },
         h('span', { class: 'side-chip', 'data-side': chat.side, title: `You send with the ${SIDE_NAMES[chat.side]} half of the pad` }, sideIcon(chat.side), SIDE_NAMES[chat.side]),
+        sourceChip(chat.source),
         h('span', { class: 'fingerprint', title: 'Pad fingerprint' }, chat.fingerprint),
         live,
       ),

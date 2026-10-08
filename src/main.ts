@@ -109,11 +109,11 @@ function renderHome() {
         'div',
         { class: 'hero glass glass--track' },
         h('div', { class: 'hero-orb glass glass--tinted' }, icon('shield')),
-        h('h1', null, 'Messages no computer can break.'),
+        h('h1', null, 'The messenger you can make provably unbreakable.'),
         h(
           'p',
           null,
-          'padmessage encrypts with one-time pads: random keys you swap in person and never reuse. No amount of computing power, quantum or otherwise, can read them.',
+          'padmessage encrypts with one-time pads: random keys you swap in person and never reuse. Make your pad from true hardware randomness and no amount of computing power, quantum or otherwise, can read your messages.',
         ),
         h(
           'div',
