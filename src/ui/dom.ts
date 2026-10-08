@@ -39,6 +39,7 @@ function append(el: Element, children: (Child | Child[])[]) {
 }
 
 const ICONS = {
+  logo: '<path d="M8.73 18.52A7.75 7.75 0 1 0 4.98 14.78L4.2 19.6Z"/><path d="M12 3.75v15.5M4.25 11.5h15.5"/>',
   pad: '<path d="M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
   lock: '<rect x="4" y="10.5" width="16" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -53,10 +54,6 @@ const ICONS = {
   shield: '<path d="M12 3.5 5 6v5.5c0 4.3 2.9 7.9 7 9 4.1-1.1 7-4.7 7-9V6l-7-2.5Z"/><path d="m9 12 2.2 2.2L15.5 10"/>',
   alert: '<path d="M12 4 2.8 19.5h18.4L12 4Z"/><path d="M12 10v4.5M12 17.2v.1"/>',
   info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8v.1"/>',
-  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
-  moon: '<path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10Z"/>',
-  check: '<path d="m5.5 12.5 4 4 9-9"/>',
-  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   edit: '<path d="M4.5 19.5h4l10-10-4-4-10 10v4Z"/><path d="m13 7 4 4"/>',
   camera: '<path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.8l1.4-2h4.6l1.4 2h1.8A2.5 2.5 0 0 1 20 8.5v8a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5v-8Z"/><circle cx="12" cy="12.5" r="3.5"/>',
 } as const;
@@ -69,9 +66,6 @@ export function icon(name: IconName): SVGSVGElement {
   return wrap.firstElementChild as SVGSVGElement;
 }
 
-export function sideIcon(side: 0 | 1) {
-  return icon(side === 0 ? 'sun' : 'moon');
-}
 
 /** Pointer-tracked sheen for every .glass--interactive surface. */
 export function installGlassPointer() {
@@ -151,7 +145,7 @@ export const SOURCE_INFO: Record<PadSource | 'unknown', { label: string; detail:
   webcam: {
     label: 'Camera noise',
     detail:
-      'Your browser’s generator mixed with sensor noise from your camera. Never weaker than browser random, and it adds physical randomness the browser can’t influence. Not labelled true random: padmessage can’t verify how much real noise a camera delivers, since cameras denoise and compress, and a virtual camera could feed it anything.',
+      'Your browser’s generator mixed with sensor noise from your camera. Never weaker than browser random, and it adds physical randomness the browser can’t influence. Not labelled true random: PadMessage can’t verify how much real noise a camera delivers, since cameras denoise and compress, and a virtual camera could feed it anything.',
   },
   csprng: {
     label: 'Browser random',
@@ -161,9 +155,9 @@ export const SOURCE_INFO: Record<PadSource | 'unknown', { label: string; detail:
   external: {
     label: 'Unverified',
     detail:
-      'This file has no padmessage header, so there is no record of how it was made. It is only as strong as its source: true random if it came straight from a hardware generator, worthless if it didn’t.',
+      'This file has no PadMessage header, so there is no record of how it was made. It is only as strong as its source: true random if it came straight from a hardware generator, worthless if it didn’t.',
   },
-  unknown: { label: 'Unknown source', detail: 'This pad was loaded before padmessage tracked where randomness came from.' },
+  unknown: { label: 'Unknown source', detail: 'This pad was loaded before PadMessage tracked where randomness came from.' },
 };
 
 export function sourceChip(source: PadSource | undefined) {

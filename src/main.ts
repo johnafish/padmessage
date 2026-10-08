@@ -1,9 +1,9 @@
 import './styles/app.css';
 import { fetchMessages } from './api.ts';
-import { isChatId, SIDE_NAMES } from './crypto/pad.ts';
+import { isChatId } from './crypto/pad.ts';
 import { getChat, listChats, type ChatRecord } from './store.ts';
 import { mountChat } from './ui/chat.ts';
-import { avatar, h, icon, installGlassPointer, sideIcon } from './ui/dom.ts';
+import { avatar, h, icon, installGlassPointer } from './ui/dom.ts';
 import { importPadSheet, newPadSheet } from './ui/sheets.ts';
 
 installGlassPointer();
@@ -19,8 +19,8 @@ const app = h(
     h(
       'div',
       { class: 'brand' },
-      h('div', { class: 'brand-mark' }, icon('pad')),
-      h('div', { class: 'brand-name' }, 'padmessage'),
+      h('div', { class: 'brand-mark', 'aria-hidden': 'true' }, icon('logo')),
+      h('div', { class: 'brand-name' }, 'PadMessage'),
     ),
     list,
     h(
@@ -76,6 +76,9 @@ async function route() {
 async function renderList() {
   const chats = await listChats();
   list.replaceChildren(...chats.map(row));
+  // Runs on every route change and rename, so the tab title stays current.
+  const current = chats.find((c) => c.chatId === currentChat);
+  document.title = current ? `${current.name} · PadMessage` : currentChat ? 'Locked chat · PadMessage' : 'PadMessage';
 }
 
 function row(chat: ChatRecord) {
@@ -94,7 +97,6 @@ function row(chat: ChatRecord) {
       h('div', { class: 'chat-row-name' }, chat.name),
       h('div', { class: 'chat-row-sub' }, chat.fingerprint),
     ),
-    h('span', { class: 'side-chip', 'data-side': chat.side, title: `You are ${SIDE_NAMES[chat.side]}` }, sideIcon(chat.side)),
   );
 }
 
@@ -113,7 +115,7 @@ function renderHome() {
         h(
           'p',
           null,
-          'padmessage encrypts with one-time pads: random keys you swap in person and never reuse. Make your pad from true hardware randomness and no amount of computing power, quantum or otherwise, can read your messages.',
+          'PadMessage encrypts with one-time pads: random keys you swap in person and never reuse. Make your pad from true hardware randomness and no amount of computing power, quantum or otherwise, can read your messages.',
         ),
         h(
           'div',

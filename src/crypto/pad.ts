@@ -1,8 +1,8 @@
 // Pad files, identity, and sanity checks.
 //
 // A pad is a block of random bytes shared by exactly two people. It is split
-// into two halves; side 0 ("Sun") only ever encrypts with the first half and
-// side 1 ("Moon") only with the second, so the two parties can never consume
+// into two halves; side 0 only ever encrypts with the first half and side 1
+// only with the second, so the two parties can never consume
 // the same bytes. Bytes within a half are consumed strictly forward.
 //
 // File format: either a raw blob of random bytes (side chosen by the user on
@@ -15,8 +15,6 @@
 // The header is never part of the key material or the pad identity.
 
 export type Side = 0 | 1;
-
-export const SIDE_NAMES = ['Sun', 'Moon'] as const;
 
 const MAGIC = new TextEncoder().encode('PADMSG1\0');
 const HEADER_LEN = 16;

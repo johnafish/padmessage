@@ -10,12 +10,11 @@ import {
   MAX_PAD_BYTES,
   entropyId,
   parsePadFile,
-  SIDE_NAMES,
   type PadSource,
   type Side,
 } from '../crypto/pad.ts';
 import { addChat, getChat, isEntropyUsed, updateChat, type ChatRecord } from '../store.ts';
-import { download, formatBytes, h, icon, messagesLeft, sideIcon, SOURCE_INFO, sourceChip, toast } from './dom.ts';
+import { download, formatBytes, h, icon, messagesLeft, SOURCE_INFO, sourceChip, toast } from './dom.ts';
 import { cameraSupported, collectCameraNoise, startCamera, stopCamera } from './webcam.ts';
 
 // ---------- sheet scaffolding ----------
@@ -57,10 +56,6 @@ function render(sheet: Sheet, ...children: (Node | false | null | undefined)[]) 
 function callout(tone: 'info' | 'warn' | 'danger', ...content: (Node | string)[]) {
   const ic = tone === 'info' ? 'info' : 'alert';
   return h('div', { class: `callout${tone === 'info' ? '' : ` callout--${tone}`}` }, icon(ic), h('div', null, ...content));
-}
-
-function sideChip(side: Side) {
-  return h('span', { class: 'side-chip', 'data-side': side }, sideIcon(side), SIDE_NAMES[side]);
 }
 
 function fingerprintCard(fp: string, source?: PadSource) {
@@ -410,7 +405,7 @@ function showHandoff(sheet: Sheet, chat: ChatRecord, body: Uint8Array, onOpen: (
       class: 'btn glass glass--pill glass--interactive',
       autofocus: true,
       onclick: async () => {
-        download(encodePadFile(body, partner, chat.source ?? 'external'), `${slug(chat.name)}-${SIDE_NAMES[partner].toLowerCase()}.pad`);
+        download(encodePadFile(body, partner, chat.source ?? 'external'), `${slug(chat.name)}-partner.pad`);
         await updateChat(chat.chatId, { partnerExported: true });
         openBtn.disabled = false;
       },
@@ -421,7 +416,7 @@ function showHandoff(sheet: Sheet, chat: ChatRecord, body: Uint8Array, onOpen: (
   render(
     sheet,
     h('h2', null, 'Pad ready'),
-    h('p', { class: 'lede' }, 'You are ', sideChip(chat.side), '. Your partner’s copy is marked ', sideChip(partner), ' so you never use the same bytes.'),
+    h('p', { class: 'lede' }, 'Your partner’s copy is set to use the other half of the pad, so you never use the same bytes.'),
     fingerprintCard(chat.fingerprint, chat.source),
     callout(
       'warn',
@@ -506,7 +501,7 @@ export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOpt
 
   function confirm(body: Uint8Array, presetSide: Side | null, source: PadSource, chatId: string, fingerprint: string, writeKey: string, filename: string) {
     let side: Side | null = presetSide;
-    const name = nameField(filename.replace(/\.pad$/i, '').replace(/-(sun|moon)$/i, '').replace(/[-_]+/g, ' ').trim());
+    const name = nameField(filename.replace(/\.pad$/i, '').replace(/-(partner|sun|moon)$/i, '').replace(/[-_]+/g, ' ').trim());
     const go = h(
       'button',
       { class: 'btn glass glass--tinted glass--pill glass--interactive', disabled: side === null, onclick: () => void save() },
@@ -529,16 +524,21 @@ export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOpt
               go.disabled = false;
             },
           },
-          sideChip(s),
-          h('span', null, s === 0 ? 'First half of the pad' : 'Second half of the pad'),
+          h('b', null, s === 0 ? 'First half' : 'Second half'),
+          h('span', null, s === 0 ? 'Bytes 0–50%' : 'Bytes 50–100%'),
         ),
       );
       sidePicker = h(
         'div',
         { class: 'field' },
-        h('span', { class: 'field-label' }, 'Your side'),
+        h('span', { class: 'field-label' }, 'Which half is yours?'),
         h('div', { class: 'choices choices--2' }, ...buttons),
-        callout('warn', 'This file has no side marked. ', h('b', null, 'Agree with your partner'), ' that one of you is Sun and the other is Moon. If you both pick the same side, messages can be broken.'),
+        callout(
+          'warn',
+          'This file doesn’t say which half is yours. ',
+          h('b', null, 'Agree with your partner'),
+          ' that one of you takes the first half and the other the second. If you both pick the same half, messages can be broken.',
+        ),
       );
     }
 
@@ -547,7 +547,6 @@ export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOpt
       h('h2', null, 'Check the fingerprint'),
       h('p', { class: 'lede' }, `${formatBytes(body.length)} pad · ${messagesLeft(halfSize(body.length))} messages each way. Compare this with your partner’s screen.`),
       fingerprintCard(fingerprint, source),
-      presetSide !== null && h('p', { class: 'lede' }, 'This copy is marked ', sideChip(presetSide), '.'),
       source === 'external' &&
         callout('warn', h('b', null, 'Unverified randomness. '), SOURCE_INFO.external.detail),
       h('div', { style: 'height: 12px' }),

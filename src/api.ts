@@ -49,12 +49,7 @@ export async function postMessage(
 }
 
 /** Live feed with automatic reconnect. Calls `onReconnect` so callers can backfill. */
-export function subscribe(
-  chatId: string,
-  onMessage: (m: WireMessage) => void,
-  onStatus: (online: boolean) => void,
-  onReconnect: () => void,
-): () => void {
+export function subscribe(chatId: string, onMessage: (m: WireMessage) => void, onReconnect: () => void): () => void {
   let sock: WebSocket | null = null;
   let closed = false;
   let retry = 0;
@@ -65,7 +60,6 @@ export function subscribe(
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     sock = new WebSocket(`${proto}//${location.host}/ws/${chatId}`);
     sock.onopen = () => {
-      onStatus(true);
       if (retry > 0) onReconnect();
       retry = 0;
       ping = setInterval(() => sock?.readyState === WebSocket.OPEN && sock.send('ping'), 25_000);
@@ -80,7 +74,6 @@ export function subscribe(
     };
     sock.onclose = () => {
       clearInterval(ping);
-      onStatus(false);
       if (closed) return;
       retry++;
       timer = setTimeout(connect, Math.min(15_000, 500 * 2 ** retry));

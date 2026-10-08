@@ -1,8 +1,8 @@
 import { fetchMessages, postMessage, subscribe, type WireMessage } from '../api.ts';
 import { costOf, costOfCiphertext, frameText, MAX_TEXT_CHARS, open, seal, unframeText } from '../crypto/otp.ts';
-import { fromBase64, SIDE_NAMES, toBase64, type Side } from '../crypto/pad.ts';
+import { fromBase64, toBase64, type Side } from '../crypto/pad.ts';
 import { deleteChat, getChat, getPad, PadExhaustedError, reserve } from '../store.ts';
-import { avatar, formatBytes, h, icon, messagesLeft, sideIcon, sourceChip, toast } from './dom.ts';
+import { avatar, formatBytes, h, icon, messagesLeft, sourceChip, toast } from './dom.ts';
 import { confirmSheet, exportPartnerCopy, renameSheet } from './sheets.ts';
 
 interface Item {
@@ -34,8 +34,6 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   // ----- layout -----
 
   let av = avatar(chat.name, chatId);
-  const liveLabel = h('span', { class: 'chip-label' }, 'Connecting');
-  const live = h('span', { class: 'live', 'data-online': 'false' }, liveLabel);
   const nameEl = h('div', { class: 'chat-head-name' }, chat.name);
   const gauge = h('div', { class: 'gauge' });
   const gaugeLabel = h('span', { class: 'gauge-label' });
@@ -60,10 +58,8 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       h(
         'div',
         { class: 'chat-head-sub' },
-        h('span', { class: 'side-chip', 'data-side': chat.side, title: `You send with the ${SIDE_NAMES[chat.side]} half of the pad` }, sideIcon(chat.side), h('span', { class: 'chip-label' }, SIDE_NAMES[chat.side])),
         sourceChip(chat.source),
         h('span', { class: 'fingerprint', title: 'Pad fingerprint' }, chat.fingerprint),
-        live,
       ),
     ),
     h(
@@ -171,8 +167,8 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     collision = true;
     banner.hidden = false;
     banner.replaceChildren(
-      h('b', null, 'Someone else is sending as your side. '),
-      `Messages are arriving from the ${SIDE_NAMES[chat.side]} half that this device didn’t send. Your partner may have picked the same side, or the pad was copied. Sending is paused to protect the pad. Exchange a new pad.`,
+      h('b', null, 'Someone else is using your half of the pad. '),
+      'Messages are arriving from your half that this device didn’t send. Your partner may have picked the same half, or the pad was copied. Sending is paused to protect the pad. Exchange a new pad.',
     );
     updateCost();
   }
@@ -259,8 +255,6 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       );
     }
     const meta = h('div', { class: 'bubble-meta' }, timeFmt.format(item.sentAt));
-    if (item.status === 'pending') meta.append(icon('clock'));
-    if (item.status === 'ok' && item.mine) meta.append(icon('check'));
     const el = h(
       'div',
       {
@@ -274,7 +268,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
         h(
           'button',
           { class: 'glass--interactive', style: 'text-decoration: underline; font-size: inherit', onclick: () => retry(item) },
-          'Not sent. Tap to retry',
+          'Not delivered. Tap to retry',
         ),
       );
       el.title = 'The pad bytes for this attempt are burned and won’t be reused.';
@@ -282,9 +276,15 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     return el;
   }
 
+  // Delivery status sits under your latest message only, as in most messengers.
+  // "Delivered" means the relay has stored it: it answers a send only after the
+  // write, and our own messages echo back over the socket only after it too.
+  const status = h('div', { class: 'msg-status' });
+
   function draw(forceScroll = false) {
     const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
     const ordered = [...items.values()].sort((a, b) => a.seq - b.seq || a.sentAt - b.sentAt);
+    const lastMine = ordered.findLast((it) => it.mine);
     const desired: HTMLElement[] = [];
     let lastDay = '';
     ordered.forEach((item, i) => {
@@ -302,6 +302,12 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
         !!o && o.status !== 'tampered' && item.status !== 'tampered' && o.mine === item.mine &&
         Math.abs(o.sentAt - item.sentAt) < 5 * 60_000 && dayFmt.format(o.sentAt) === day;
       desired.push(bubbleFor(item, joins(prev), joins(next)));
+      if (item === lastMine && (item.status === 'pending' || item.status === 'ok')) {
+        status.textContent = item.status === 'pending' ? 'Sending…' : 'Delivered';
+        status.dataset.status = item.status;
+        status.title = item.status === 'ok' ? 'Stored on the relay. Your partner’s device picks it up from there.' : '';
+        desired.push(status);
+      }
     });
 
     if (desired.length === 0) {
@@ -346,7 +352,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       })),
       item('link', 'Copy chat link', copyLink),
       chat.side === 0 && chat.partnerExported !== undefined
-        ? item('download', `Export partner copy (${SIDE_NAMES[1]})`, () => exportPartnerCopy(chat, pad))
+        ? item('download', 'Export partner copy', () => exportPartnerCopy(chat, pad))
         : null,
       h('hr'),
       item('trash', 'Delete from this device', () =>
@@ -419,11 +425,6 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       await ingest(m);
       draw();
       cb.onChanged();
-    },
-    (online) => {
-      live.dataset.online = String(online);
-      liveLabel.textContent = online ? 'Live' : 'Reconnecting';
-      live.title = online ? 'Connected to the relay' : 'Not connected to the relay';
     },
     () => void backfill(),
   );

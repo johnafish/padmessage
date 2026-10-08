@@ -13,8 +13,6 @@
   --danger: hsl(352 90% 64%);
   --warn: hsl(38 95% 60%);
   --ok: hsl(150 70% 50%);
-  --sun: hsl(36 100% 62%);
-  --moon: hsl(210 100% 72%);
   --cam: hsl(178 65% 58%);
   --pool-1: hsl(258 45% 26% / 0.6);
   --pool-2: hsl(192 50% 18% / 0.55);
@@ -36,8 +34,6 @@
     --pool-2: hsl(188 55% 85% / 0.6);
     --pane: hsl(0 0% 100% / 0.2);
     --hairline: hsl(248 30% 20% / 0.08);
-    --sun: hsl(30 95% 48%);
-    --moon: hsl(212 90% 50%);
     --cam: hsl(184 85% 28%);
     --ok: hsl(150 75% 30%);
     --warn: hsl(32 95% 38%);
@@ -55,8 +51,6 @@
   --pool-2: hsl(188 55% 85% / 0.6);
   --pane: hsl(0 0% 100% / 0.2);
   --hairline: hsl(248 30% 20% / 0.08);
-  --sun: hsl(30 95% 48%);
-  --moon: hsl(212 90% 50%);
   --cam: hsl(184 85% 28%);
   --ok: hsl(150 75% 30%);
   --warn: hsl(32 95% 38%);
@@ -196,28 +190,36 @@ button {
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 6px 14px 8px;
+  gap: 11px;
+  padding: 6px 6px 16px 8px;
 }
+/* The mark: a speech bubble drawn as ⊕, the XOR at the heart of a one-time
+   pad, on a quiet accent tile. Matches public/icon.svg. */
 .brand-mark {
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
   display: grid;
   place-items: center;
-  background: linear-gradient(140deg, var(--accent), var(--accent-2));
-  box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.45), 0 4px 14px -4px var(--accent);
+  background: linear-gradient(160deg, hsl(256 72% 60%), hsl(250 68% 42%));
+  box-shadow:
+    inset 0 1px 0 hsl(0 0% 100% / 0.3),
+    inset 0 0 0 1px hsl(0 0% 100% / 0.08),
+    0 1px 3px hsl(250 60% 15% / 0.4);
 }
 .brand-mark svg {
-  width: 17px;
-  height: 17px;
+  width: 20px;
+  height: 20px;
   color: #fff;
+  stroke-width: 1.9;
 }
 .brand-name {
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  font-size: 17px;
   flex: 1;
+  font-weight: 650;
+  font-size: 16.5px;
+  letter-spacing: -0.022em;
+  line-height: 1;
 }
 
 .chat-list {
@@ -333,30 +335,6 @@ button {
   position: relative;
 }
 
-.side-chip {
-  flex: none;
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11.5px;
-  font-weight: 600;
-  padding: 2px 8px 2px 6px;
-  border-radius: 99px;
-  background: color-mix(in srgb, var(--chip) 18%, transparent);
-  color: var(--chip);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--chip) 35%, transparent);
-}
-.side-chip[data-side='0'] {
-  --chip: var(--sun);
-}
-.side-chip[data-side='1'] {
-  --chip: var(--moon);
-}
-.side-chip svg {
-  width: 12px;
-  height: 12px;
-}
 
 .fingerprint {
   font-family: var(--mono);
@@ -617,7 +595,6 @@ button {
   .chat-head .chip-label {
     display: none;
   }
-  .chat-head .side-chip,
   .chat-head .source-chip {
     padding: 3px 6px;
   }
@@ -687,12 +664,22 @@ button {
   opacity: 0.6;
   font-variant-numeric: tabular-nums;
 }
-.bubble-meta svg {
-  width: 12px;
-  height: 12px;
-}
 .bubble--pending {
   opacity: 0.7;
+}
+.msg-status {
+  align-self: flex-end;
+  margin: 3px 6px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+  animation: status-in 0.3s var(--glass-ease) both;
+}
+@keyframes status-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
 }
 .bubble--failed {
   --glass-tint: var(--danger);
@@ -925,9 +912,6 @@ button {
 .choices--2 {
   grid-template-columns: 1fr 1fr;
 }
-.choice .side-chip {
-  margin-bottom: 6px;
-}
 
 .dropzone {
   display: grid;
@@ -1076,22 +1060,6 @@ button {
   }
 }
 
-.live {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.live::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-3);
-}
-.live[data-online='true']::before {
-  background: var(--ok);
-  box-shadow: 0 0 6px var(--ok);
-}
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) .scrim {
