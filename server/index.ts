@@ -31,9 +31,11 @@ const TLS = !!(TLS_CERT && TLS_KEY);
 
 const MAC_KEY_BYTES = 32;
 const TAG_BYTES = 16;
-const MAX_CT_BYTES = 32 * 1024;
-const MAX_BODY_BYTES = 64 * 1024;
+const MAX_CT_BYTES = 3 * 1024 * 1024; // matches MAX_FRAME_BYTES in the client
+const MAX_BODY_BYTES = Math.ceil((MAX_CT_BYTES * 4) / 3) + 64 * 1024; // base64 + JSON
 const PAGE_LIMIT = 500;
+/** History pages also stop at this many ciphertext bytes, since images make messages large. */
+const PAGE_BYTES = 8 * 1024 * 1024;
 const STREAM_PING_MS = 25_000;
 const MAX_STREAMS_PER_IP = 32;
 const CHAT_ID = /^[A-Za-z0-9_-]{22}$/;
@@ -61,8 +63,9 @@ db.exec(`
   );
 `);
 
-const listStmt = db.prepare(
-  'SELECT seq, side, pad_offset, ct, tag, received_at FROM messages WHERE chat_id = ? AND seq > ? ORDER BY seq LIMIT ?',
+const sizesStmt = db.prepare('SELECT seq, length(ct) AS n FROM messages WHERE chat_id = ? AND seq > ? ORDER BY seq LIMIT ?');
+const rangeStmt = db.prepare(
+  'SELECT seq, side, pad_offset, ct, tag, received_at FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ? ORDER BY seq',
 );
 const overlapStmt = db.prepare(
   'SELECT 1 FROM messages WHERE chat_id = ? AND side = ? AND pad_offset < ? AND pad_end > ? LIMIT 1',
@@ -118,6 +121,26 @@ function toWire(row: Row): WireMessage {
     tag: Buffer.from(row.tag).toString('base64'),
     receivedAt: row.received_at,
   };
+}
+
+/**
+ * The next page of a chat's history after `after`: at most PAGE_LIMIT
+ * messages and (beyond the first) PAGE_BYTES of ciphertext. Sizes are read
+ * first so large messages are never loaded just to be dropped. Synchronous,
+ * like every node:sqlite call.
+ */
+function page(chatId: string, after: number): { rows: Row[]; more: boolean } {
+  const sizes = sizesStmt.all(chatId, after, PAGE_LIMIT) as { seq: number; n: number }[];
+  if (sizes.length === 0) return { rows: [], more: false };
+  let bytes = 0;
+  let count = 0;
+  for (const { n } of sizes) {
+    if (count > 0 && bytes + n > PAGE_BYTES) break;
+    bytes += n;
+    count++;
+  }
+  const rows = rangeStmt.all(chatId, after, sizes[count - 1].seq) as Row[];
+  return { rows, more: count < sizes.length || sizes.length === PAGE_LIMIT };
 }
 
 function postMessage(chatId: string, body: unknown): WireMessage {
@@ -216,10 +239,10 @@ function openStream(req: IncomingMessage, res: ServerResponse, chatId: string, u
   });
   // Replay and join the room in one synchronous block: node:sqlite is
   // synchronous, so no message can be stored between the query and the join.
-  const rows = listStmt.all(chatId, after, PAGE_LIMIT) as Row[];
+  const { rows, more } = page(chatId, after);
   let frames = 'retry: 3000\n\n' + rows.map((r) => eventFrame(toWire(r))).join('');
   // Too far behind to replay in one go: the client pages the rest over GET.
-  if (rows.length === PAGE_LIMIT) frames += 'event: resync\ndata: {}\n\n';
+  if (more) frames += 'event: resync\ndata: {}\n\n';
   res.write(frames);
 
   const room = rooms.get(chatId) ?? new Set();
@@ -350,8 +373,8 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
       const chatId = match[1];
       if (!CHAT_ID.test(chatId)) throw new HttpError(400, 'bad chat id');
       if (req.method === 'GET') {
-        const rows = listStmt.all(chatId, intParam(url.searchParams.get('after')), PAGE_LIMIT) as Row[];
-        return sendJson(res, 200, { messages: rows.map(toWire), more: rows.length === PAGE_LIMIT });
+        const { rows, more } = page(chatId, intParam(url.searchParams.get('after')));
+        return sendJson(res, 200, { messages: rows.map(toWire), more });
       }
       if (req.method === 'POST') {
         if (!allow(clientIp(req))) throw new HttpError(429, 'slow down');

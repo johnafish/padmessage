@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { poly1305 } from '@noble/ciphers/_poly1305.js';
-import { costOf, frameText, open, seal, unframeText } from './otp.ts';
+import { costOf, costOfContent, frame, frameText, open, seal, unframe, unframeText, type Content } from './otp.ts';
 import { checkRandomness, encodePadFile, entropyId, generatePad, halfSize, identifyPad, parsePadFile } from './pad.ts';
 
 const hex = (s: string) => Uint8Array.from(s.match(/../g)!.map((b) => parseInt(b, 16)));
@@ -99,5 +99,47 @@ describe('pad files', () => {
     const hw = generatePad(256 * 1024);
     expect(await entropyId(hw)).toBe(await entropyId(hw.subarray(0, 128 * 1024)));
     expect(await entropyId(hw)).not.toBe(await entropyId(generatePad(256 * 1024)));
+  });
+});
+
+describe('image messages', () => {
+  const pad = generatePad(256 * 1024);
+  const chatId = 'AAAAAAAAAAAAAAAAAAAAAA';
+  const image: Content = {
+    kind: 'image',
+    mime: 'image/webp',
+    width: 1280,
+    height: 960,
+    data: generatePad(20_000),
+    caption: 'the view from here ⛰️',
+  };
+
+  it('round-trips through seal and open, with caption and dimensions', () => {
+    const framed = frame(image, 42);
+    const opened = unframe(open(pad, chatId, seal(pad, chatId, 1, 0, framed)));
+    expect(opened.sentAt).toBe(42);
+    expect(opened.content).toEqual(image);
+  });
+
+  it('costs exactly the pad bytes it seals', () => {
+    const framed = frame(image, 0);
+    expect(costOfContent(image)).toBe(32 + framed.length);
+    expect(framed.length % 32).toBe(0);
+  });
+
+  it('keeps text messages readable through the generic decoder', () => {
+    expect(unframe(frameText('hi', 5))).toEqual({ content: { kind: 'text', text: 'hi' }, sentAt: 5 });
+  });
+
+  it('rejects truncated or unknown frames', () => {
+    const framed = frame(image, 0);
+    expect(() => unframe(framed.subarray(0, 100))).toThrow();
+    const unknownMime = framed.slice();
+    unknownMime[10] = 99;
+    expect(() => unframe(unknownMime)).toThrow();
+    const unknownKind = framed.slice();
+    unknownKind[1] = 7;
+    expect(() => unframe(unknownKind)).toThrow(/Unknown/);
+    expect(() => unframeText(framed)).toThrow(/Not a text/);
   });
 });

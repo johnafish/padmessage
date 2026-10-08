@@ -154,6 +154,26 @@ describe('relay', () => {
     expect(other.status).toBe(401);
   });
 
+  it('accepts image-sized messages up to 3 MB and pages history by size', async () => {
+    const BIG = 'BigChatAAAAAAAAAAAAAAA';
+    const post = (offset: number, bytes: number) =>
+      fetch(`${base}/api/chats/${BIG}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-write-key': KEY, 'x-forwarded-for': '10.7.0.1' },
+        body: JSON.stringify({ side: 0, offset, ct: Buffer.alloc(bytes, 3).toString('base64'), tag: Buffer.alloc(16).toString('base64') }),
+      });
+    const MB = 1024 * 1024;
+    expect((await post(0, 3 * MB + 1)).status).toBe(413);
+    for (let i = 0; i < 4; i++) expect((await post(i * 3 * MB, 2.5 * MB)).status).toBe(201);
+    // 4 × 2.5 MB is over the 8 MB page budget: three fit, the fourth comes next.
+    const first = await (await fetch(`${base}/api/chats/${BIG}/messages?after=0`)).json();
+    expect(first.messages.length).toBe(3);
+    expect(first.more).toBe(true);
+    const next = await (await fetch(`${base}/api/chats/${BIG}/messages?after=${first.messages[2].seq}`)).json();
+    expect(next.messages.length).toBe(1);
+    expect(next.more).toBe(false);
+  });
+
   it('rejects malformed paths and never serves files outside the app', async () => {
     expect((await fetch(`${base}/%E0%A4%A`)).status).toBe(400);
     // An encoded slash survives URL normalization and decodes to ../ on the server.

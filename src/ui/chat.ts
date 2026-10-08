@@ -1,8 +1,19 @@
 import { fetchMessages, postMessage, subscribe, type WireMessage } from '../api.ts';
-import { costOf, costOfCiphertext, frameText, MAX_TEXT_CHARS, open, seal, unframeText } from '../crypto/otp.ts';
+import {
+  costOfCiphertext,
+  costOfContent,
+  frame,
+  MAX_FRAME_BYTES,
+  MAX_TEXT_CHARS,
+  open,
+  seal,
+  unframe,
+  type Content,
+} from '../crypto/otp.ts';
 import { fromBase64, toBase64, type Side } from '../crypto/pad.ts';
 import { deleteChat, getChat, getPad, PadExhaustedError, reserve } from '../store.ts';
 import { avatar, formatBytes, h, icon, messagesLeft, sourceChip, toast } from './dom.ts';
+import { prepareImage, type ImageOption } from './images.ts';
 import { confirmSheet, exportPartnerCopy, renameSheet } from './sheets.ts';
 
 interface Item {
@@ -10,9 +21,16 @@ interface Item {
   key: string;
   seq: number; // Infinity while pending
   mine: boolean;
-  status: 'ok' | 'pending' | 'failed' | 'tampered';
-  text: string;
+  /** tampered: failed authentication. unsupported: authentic, but a format this version can't show. */
+  status: 'ok' | 'pending' | 'failed' | 'tampered' | 'unsupported';
+  content: Content | null;
   sentAt: number;
+}
+
+interface Attachment {
+  options: ImageOption[];
+  choice: number;
+  thumb: string;
 }
 
 export interface ChatCallbacks {
@@ -28,8 +46,12 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   const highWater: [number, number] = [0, 0];
   const items = new Map<string, Item>();
   const nodes = new Map<string, HTMLElement>();
+  const imageUrls = new Map<string, string>();
   let lastSeq = 0;
   let collision = false;
+  let attachment: Attachment | null = null;
+  let preparing = false;
+  let reserving = false;
 
   // ----- layout -----
 
@@ -78,25 +100,36 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   const list = h('div', { class: 'messages', role: 'log', 'aria-live': 'polite' });
   const banner = h('div', { class: 'banner glass glass--tinted', role: 'alert', hidden: true });
 
+  // Composer: one bar holding [attach] [text] [cost] [send], with an
+  // attachment tray above the row when a photo is attached.
+  const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: true });
+  const attachBtn = h(
+    'button',
+    { class: 'composer-attach glass--interactive', 'aria-label': 'Attach a photo', title: 'Attach a photo', onclick: () => fileInput.click() },
+    icon('image'),
+  );
   const textarea = h('textarea', { rows: 1, placeholder: 'Message', maxlength: MAX_TEXT_CHARS, 'aria-label': 'Message' });
-  const cost = h('div', { class: 'composer-cost' });
+  const hint = h('span', { class: 'composer-hint', 'aria-live': 'polite' });
   const sendBtn = h(
     'button',
     { class: 'send glass glass--tinted glass--pill glass--interactive', 'aria-label': 'Send', disabled: true, onclick: () => void send() },
     icon('send'),
   );
+  const tray = h('div', { class: 'composer-tray', hidden: true });
   const composer = h(
     'div',
     { class: 'composer glass glass--track' },
-    h('div', { class: 'composer-field glass-well' }, textarea, cost),
-    sendBtn,
+    tray,
+    h('div', { class: 'composer-row' }, attachBtn, textarea, hint, sendBtn),
+    fileInput,
   );
 
   const root = h('section', { class: 'chat' }, head, banner, list, composer);
   container.replaceChildren(root);
 
   // The header and composer float over the list and change height (header
-  // compaction, a multi-line draft), so the list's padding tracks them.
+  // compaction, a multi-line draft, the attachment tray), so the list's
+  // padding tracks them.
   const spacing = new ResizeObserver(() => {
     const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
     root.style.setProperty('--head-space', `${head.offsetTop + head.offsetHeight}px`);
@@ -118,21 +151,156 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     gauge.style.setProperty('--gauge-color', pct < 10 ? 'var(--danger)' : pct < 25 ? 'var(--warn)' : 'var(--accent-2)');
     gaugeLabel.textContent = `${pct}`;
     gaugeWrap.title = `${formatBytes(left)} of your half left (≈${messagesLeft(left)} messages)`;
-    updateCost();
+    updateComposer();
   }
 
-  function updateCost() {
-    const text = textarea.value.trim();
-    const left = remaining();
-    const need = text ? costOf(text) : 0;
-    cost.dataset.warn = String(need > left || left / chat.half < 0.1);
-    cost.textContent = need > left
-      ? 'Not enough pad left for this message'
-      : text
-        ? `Uses ${formatBytes(need)} of pad · ${formatBytes(left)} left`
-        : `${formatBytes(left)} of pad left · ≈${messagesLeft(left)} messages`;
-    sendBtn.disabled = !text || need > left || collision;
+  // ----- composer -----
+
+  function imageContent(option: ImageOption, caption: string): Content {
+    return { kind: 'image', mime: option.mime, width: option.width, height: option.height, data: option.data, caption };
   }
+
+  function draft(): Content | null {
+    const text = textarea.value.trim();
+    if (attachment) return imageContent(attachment.options[attachment.choice], text);
+    return text ? { kind: 'text', text } : null;
+  }
+
+  /** Cost hint and send state. The hint only appears when it says something. */
+  function updateComposer() {
+    const left = remaining();
+    const content = draft();
+    const need = content ? costOfContent(content) : 0;
+    let text = '';
+    let tone = '';
+    if (preparing) text = 'Preparing…';
+    else if (content && need > left) [text, tone] = ['Not enough pad', 'danger'];
+    else if (content && need > MAX_FRAME_BYTES) [text, tone] = ['Too large', 'danger'];
+    else if (content) [text, tone] = [formatBytes(need), left / chat.half < 0.1 ? 'warn' : ''];
+    else if (left / chat.half < 0.1) [text, tone] = [`${formatBytes(left)} left`, 'warn'];
+    hint.textContent = text;
+    hint.dataset.tone = tone;
+    hint.title = content ? `Uses ${formatBytes(need)} of pad. ${formatBytes(left)} left in your half.` : `${formatBytes(left)} of pad left in your half.`;
+    sendBtn.disabled = !content || need > left || need > MAX_FRAME_BYTES || collision || preparing;
+    if (attachment) renderTrayChoices();
+  }
+
+  async function attach(file: File) {
+    if (file.type && !file.type.startsWith('image/')) return toast('Only images can be attached.');
+    clearAttachment();
+    preparing = true;
+    tray.hidden = false;
+    tray.replaceChildren(h('div', { class: 'tray-thumb tray-thumb--loading' }), h('div', { class: 'tray-body' }, h('div', { class: 'tray-note' }, 'Preparing photo…')));
+    updateComposer();
+    try {
+      const options = await prepareImage(file);
+      const left = remaining();
+      const costs = options.map((o) => costOfContent(imageContent(o, '')));
+      // Default to the largest size that spends at most a quarter of what's
+      // left, else the smallest that fits at all.
+      let choice = costs.findLastIndex((c) => c <= left / 4);
+      if (choice < 0) choice = Math.max(0, costs.findIndex((c) => c <= left));
+      attachment = { options, choice, thumb: URL.createObjectURL(new Blob([options[0].data as BlobPart], { type: options[0].mime })) };
+      renderTray();
+    } catch (err) {
+      tray.hidden = true;
+      toast(err instanceof Error ? err.message : 'Couldn’t attach that image.');
+    } finally {
+      preparing = false;
+      updateComposer();
+      textarea.focus();
+    }
+  }
+
+  function clearAttachment() {
+    if (attachment) URL.revokeObjectURL(attachment.thumb);
+    attachment = null;
+    tray.hidden = true;
+    tray.replaceChildren();
+  }
+
+  const trayChoices = h('div', { class: 'tray-choices', role: 'radiogroup', 'aria-label': 'Photo size' });
+
+  function renderTray() {
+    if (!attachment) return;
+    tray.hidden = false;
+    tray.replaceChildren(
+      h('img', { class: 'tray-thumb', src: attachment.thumb, alt: 'Attached photo' }),
+      h('div', { class: 'tray-body' }, trayChoices, h('div', { class: 'tray-note' }, 'Location and camera details are removed.')),
+      h(
+        'button',
+        {
+          class: 'tray-remove glass--interactive',
+          'aria-label': 'Remove photo',
+          onclick: () => {
+            clearAttachment();
+            updateComposer();
+            textarea.focus();
+          },
+        },
+        icon('close'),
+      ),
+    );
+    renderTrayChoices();
+  }
+
+  function renderTrayChoices() {
+    if (!attachment) return;
+    const a = attachment;
+    const left = remaining();
+    const caption = textarea.value.trim();
+    trayChoices.replaceChildren(
+      ...a.options.map((o, i) => {
+        const cost = costOfContent(imageContent(o, caption));
+        return h(
+          'button',
+          {
+            class: 'tray-choice',
+            role: 'radio',
+            'aria-checked': String(i === a.choice),
+            disabled: cost > left || cost > MAX_FRAME_BYTES,
+            title: `${o.width}×${o.height}`,
+            onclick: () => {
+              a.choice = i;
+              updateComposer();
+            },
+          },
+          h('b', null, o.label),
+          ` ${formatBytes(cost)}`,
+        );
+      }),
+    );
+  }
+
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = '';
+    if (file) void attach(file);
+  });
+  textarea.addEventListener('paste', (e) => {
+    const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'));
+    if (file) {
+      e.preventDefault();
+      void attach(file);
+    }
+  });
+  // Drop a photo anywhere on the chat.
+  root.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    root.dataset.drop = 'true';
+  });
+  root.addEventListener('dragleave', (e) => {
+    if (!root.contains(e.relatedTarget as Node | null)) delete root.dataset.drop;
+  });
+  root.addEventListener('drop', (e) => {
+    if (!e.dataTransfer?.files.length) return;
+    e.preventDefault();
+    delete root.dataset.drop;
+    const file = [...e.dataTransfer.files].find((f) => f.type.startsWith('image/'));
+    if (file) void attach(file);
+    else toast('Only images can be attached.');
+  });
 
   // ----- receiving -----
 
@@ -143,12 +311,12 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     const ct = fromBase64(wire.ct);
     const mine = side === chat.side;
 
-    let opened;
+    let plain: Uint8Array;
     try {
-      opened = unframeText(open(pad, chatId, { side, offset: wire.offset, ct, tag: fromBase64(wire.tag) }));
+      plain = open(pad, chatId, { side, offset: wire.offset, ct, tag: fromBase64(wire.tag) });
     } catch {
       // Forged or corrupt. It never counts toward pad usage, so junk can't burn the pad.
-      items.set(key, { key, seq: wire.seq, mine: false, status: 'tampered', text: '', sentAt: wire.receivedAt });
+      items.set(key, { key, seq: wire.seq, mine: false, status: 'tampered', content: null, sentAt: wire.receivedAt });
       return;
     }
     highWater[side] = Math.max(highWater[side], wire.offset + costOfCiphertext(ct.length));
@@ -159,7 +327,12 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       chat.sentOffsets.forEach((o) => sentOffsets.add(o));
       if (!sentOffsets.has(wire.offset)) flagCollision();
     }
-    items.set(key, { key, seq: wire.seq, mine, status: 'ok', ...opened });
+    try {
+      const { content, sentAt } = unframe(plain);
+      items.set(key, { key, seq: wire.seq, mine, status: 'ok', content, sentAt });
+    } catch {
+      items.set(key, { key, seq: wire.seq, mine, status: 'unsupported', content: null, sentAt: wire.receivedAt });
+    }
   }
 
   function flagCollision() {
@@ -170,7 +343,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       h('b', null, 'Someone else is using your half of the pad. '),
       'Messages are arriving from your half that this device didn’t send. Your partner may have picked the same half, or the pad was copied. Sending is paused to protect the pad. Exchange a new pad.',
     );
-    updateCost();
+    updateComposer();
   }
 
   async function backfill() {
@@ -182,53 +355,69 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   // ----- sending -----
 
   async function send() {
-    const text = textarea.value.trim();
-    if (!text || collision) return;
-    const need = costOf(text);
+    const content = draft();
+    if (!content || collision || preparing || reserving) return;
+    await sendContent(content, () => {
+      textarea.value = '';
+      clearAttachment();
+      autosize();
+    });
+  }
+
+  /** Reserves pad bytes, then encrypts and posts. `onReserved` clears the draft once the bytes are claimed. */
+  async function sendContent(content: Content, onReserved?: () => void) {
+    const need = costOfContent(content);
     let offset: number;
+    reserving = true;
     try {
       offset = await reserve(chatId, need, highWater[chat.side]);
     } catch (err) {
       toast(err instanceof PadExhaustedError ? err.message : 'Couldn’t reserve pad bytes');
       return;
+    } finally {
+      reserving = false;
     }
+    onReserved?.();
     sentOffsets.add(offset);
     chat = { ...chat, sendOffset: offset + need };
-    textarea.value = '';
-    autosize();
 
     const sentAt = Date.now();
     const key = `${chat.side}:${offset}`;
-    items.set(key, { key, seq: Infinity, mine: true, status: 'pending', text, sentAt });
+    items.set(key, { key, seq: Infinity, mine: true, status: 'pending', content, sentAt });
     draw(true);
 
-    const sealed = seal(pad, chatId, chat.side, offset, frameText(text, sentAt));
+    const sealed = seal(pad, chatId, chat.side, offset, frame(content, sentAt));
     try {
       const wire = await postMessage(chatId, chat.writeKey, { side: chat.side, offset, ct: toBase64(sealed.ct), tag: toBase64(sealed.tag) });
-      const existing = items.get(key);
-      if (existing?.status !== 'ok') items.set(key, { key, seq: wire.seq, mine: true, status: 'ok', text, sentAt });
+      if (items.get(key)?.status !== 'ok') items.set(key, { key, seq: wire.seq, mine: true, status: 'ok', content, sentAt });
       highWater[chat.side] = Math.max(highWater[chat.side], offset + need);
       lastSeq = Math.max(lastSeq, wire.seq);
     } catch (err) {
       console.warn('send failed', err);
-      items.set(key, { key, seq: Infinity, mine: true, status: 'failed', text, sentAt });
+      items.set(key, { key, seq: Infinity, mine: true, status: 'failed', content, sentAt });
     }
     draw();
     cb.onChanged();
   }
 
+  /** Resends with fresh pad bytes; the failed attempt's bytes stay burned. */
   function retry(item: Item) {
+    if (!item.content) return;
     items.delete(item.key);
-    textarea.value = item.text;
-    autosize();
     draw();
-    void send();
+    void sendContent(item.content);
   }
 
   // ----- rendering -----
 
   const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
   const timeFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+
+  function imageUrl(item: Item, content: Extract<Content, { kind: 'image' }>): string {
+    let url = imageUrls.get(item.key);
+    if (!url) imageUrls.set(item.key, (url = URL.createObjectURL(new Blob([content.data as BlobPart], { type: content.mime }))));
+    return url;
+  }
 
   function bubbleFor(item: Item, contPrev: boolean, contNext: boolean): HTMLElement {
     let el = nodes.get(item.key);
@@ -246,23 +435,40 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   }
 
   function buildBubble(item: Item): HTMLElement {
-    if (item.status === 'tampered') {
+    if (item.status === 'tampered' || item.status === 'unsupported' || !item.content) {
       return h(
         'div',
         { class: 'bubble bubble--alert glass glass--tinted' },
-        h('b', null, 'A message failed verification. '),
-        'It was changed in transit or wasn’t made with this pad, so it was discarded.',
+        item.status === 'unsupported'
+          ? [h('b', null, 'Can’t show this message. '), 'It’s in a format this version of PadMessage doesn’t support.']
+          : [h('b', null, 'A message failed verification. '), 'It was changed in transit or wasn’t made with this pad, so it was discarded.'],
       );
     }
+    const content = item.content;
     const meta = h('div', { class: 'bubble-meta' }, timeFmt.format(item.sentAt));
-    const el = h(
-      'div',
-      {
-        class: `bubble ${item.mine ? 'bubble--mine glass glass--tinted' : 'bubble--theirs glass'} ${item.status === 'pending' ? 'bubble--pending' : ''} ${item.status === 'failed' ? 'bubble--failed' : ''}`,
-      },
-      item.text,
-      meta,
-    );
+    const classes = [
+      'bubble',
+      item.mine ? 'bubble--mine glass glass--tinted' : 'bubble--theirs glass',
+      content.kind === 'image' ? 'bubble--image' : '',
+      item.status === 'pending' ? 'bubble--pending' : '',
+      item.status === 'failed' ? 'bubble--failed' : '',
+    ];
+    const body: (Node | string)[] = [];
+    if (content.kind === 'text') {
+      body.push(content.text);
+    } else {
+      const url = imageUrl(item, content);
+      const alt = content.caption || 'Photo';
+      body.push(
+        h(
+          'button',
+          { class: 'bubble-image', 'aria-label': 'View photo', onclick: () => openLightbox(url, content, item.sentAt) },
+          h('img', { src: url, alt, width: content.width, height: content.height, decoding: 'async' }),
+        ),
+      );
+      if (content.caption) body.push(h('div', { class: 'bubble-caption' }, content.caption));
+    }
+    const el = h('div', { class: classes.filter(Boolean).join(' ') }, ...body, meta);
     if (item.status === 'failed') {
       meta.replaceChildren(
         h(
@@ -276,9 +482,38 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     return el;
   }
 
+  function openLightbox(url: string, content: Extract<Content, { kind: 'image' }>, sentAt: number) {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const close = () => {
+      box.remove();
+      document.removeEventListener('keydown', onKey);
+      previousFocus?.focus?.();
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close();
+    const ext = content.mime === 'image/webp' ? 'webp' : 'jpg';
+    const name = `padmessage-${new Date(sentAt).toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${ext}`;
+    const closeBtn = h('button', { class: 'btn btn--icon glass glass--pill glass--interactive', 'aria-label': 'Close', onclick: close }, icon('close'));
+    const box = h(
+      'div',
+      { class: 'lightbox', role: 'dialog', 'aria-modal': 'true', 'aria-label': content.caption || 'Photo' },
+      h(
+        'div',
+        { class: 'lightbox-bar' },
+        h('a', { class: 'btn btn--sm glass glass--pill glass--interactive', href: url, download: name }, icon('download'), 'Save'),
+        closeBtn,
+      ),
+      h('img', { src: url, alt: content.caption || 'Photo' }),
+      content.caption && h('div', { class: 'lightbox-caption' }, content.caption),
+    );
+    box.addEventListener('pointerdown', (e) => e.target === box && close());
+    document.addEventListener('keydown', onKey);
+    document.body.append(box);
+    closeBtn.focus();
+  }
+
   // Delivery status sits under your latest message only, as in most messengers.
   // "Delivered" means the relay has stored it: it answers a send only after the
-  // write, and our own messages echo back over the socket only after it too.
+  // write, and our own messages echo back over the stream only after it too.
   const status = h('div', { class: 'msg-status' });
 
   function draw(forceScroll = false) {
@@ -299,7 +534,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       const prev = ordered[i - 1];
       const next = ordered[i + 1];
       const joins = (o?: Item) =>
-        !!o && o.status !== 'tampered' && item.status !== 'tampered' && o.mine === item.mine &&
+        !!o && !!o.content && !!item.content && o.mine === item.mine &&
         Math.abs(o.sentAt - item.sentAt) < 5 * 60_000 && dayFmt.format(o.sentAt) === day;
       desired.push(bubbleFor(item, joins(prev), joins(next)));
       if (item === lastMine && (item.status === 'pending' || item.status === 'ok')) {
@@ -397,7 +632,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   function autosize() {
     textarea.style.height = 'auto';
     textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
-    updateCost();
+    updateComposer();
   }
   textarea.addEventListener('input', autosize);
   textarea.addEventListener('keydown', (e) => {
@@ -441,5 +676,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     unsubscribe();
     spacing.disconnect();
     closeMenu();
+    clearAttachment();
+    for (const url of imageUrls.values()) URL.revokeObjectURL(url);
   };
 }

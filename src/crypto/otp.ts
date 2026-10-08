@@ -18,11 +18,29 @@ export const TAG_BYTES = 16;
 /** Plaintext is padded to a multiple of this to blur exact message lengths. */
 export const BLOCK = 32;
 export const MAX_TEXT_CHARS = 4000;
+/** Largest framed message; the relay refuses bigger ciphertexts. */
+export const MAX_FRAME_BYTES = 3 * 1024 * 1024;
 
 const VERSION = 1;
 const KIND_TEXT = 1;
-// version u8 | kind u8 | sentAt f64 | textLen u32
-const FRAME_HEADER = 14;
+const KIND_IMAGE = 2;
+// text:  version u8 | kind u8 | sentAt f64 | textLen u32 | text
+const TEXT_HEADER = 14;
+// image: version u8 | kind u8 | sentAt f64 | mime u8 | width u16 | height u16
+//        | captionLen u32 | dataLen u32 | caption | data
+const IMAGE_HEADER = 23;
+
+export type ImageMime = 'image/webp' | 'image/jpeg';
+const MIME_CODES: Record<ImageMime, number> = { 'image/webp': 1, 'image/jpeg': 2 };
+
+export type Content =
+  | { kind: 'text'; text: string }
+  | { kind: 'image'; mime: ImageMime; width: number; height: number; data: Uint8Array; caption: string };
+
+export interface Opened {
+  content: Content;
+  sentAt: number;
+}
 
 export interface Sealed {
   side: Side;
@@ -31,45 +49,86 @@ export interface Sealed {
   tag: Uint8Array;
 }
 
-export interface OpenedText {
-  text: string;
-  sentAt: number;
+const utf8 = new TextEncoder();
+
+function padded(length: number): number {
+  return Math.ceil(length / BLOCK) * BLOCK;
 }
 
-/** Pad bytes a message of this text will consume. */
+function framedLength(content: Content): number {
+  if (content.kind === 'text') return padded(TEXT_HEADER + utf8.encode(content.text).length);
+  return padded(IMAGE_HEADER + utf8.encode(content.caption).length + content.data.length);
+}
+
+/** Pad bytes a message will consume. */
+export function costOfContent(content: Content): number {
+  return MAC_KEY_BYTES + framedLength(content);
+}
+
+/** Pad bytes a text message will consume. */
 export function costOf(text: string): number {
-  return MAC_KEY_BYTES + framedLength(new TextEncoder().encode(text).length);
+  return costOfContent({ kind: 'text', text });
 }
 
 export function costOfCiphertext(ctLength: number): number {
   return MAC_KEY_BYTES + ctLength;
 }
 
-function framedLength(textBytes: number): number {
-  return Math.ceil((FRAME_HEADER + textBytes) / BLOCK) * BLOCK;
-}
-
-export function frameText(text: string, sentAt: number): Uint8Array {
-  const body = new TextEncoder().encode(text);
-  const out = new Uint8Array(framedLength(body.length));
+export function frame(content: Content, sentAt: number): Uint8Array {
+  const out = new Uint8Array(framedLength(content));
   const view = new DataView(out.buffer);
   out[0] = VERSION;
-  out[1] = KIND_TEXT;
   view.setFloat64(2, sentAt);
-  view.setUint32(10, body.length);
-  out.set(body, FRAME_HEADER);
+  if (content.kind === 'text') {
+    const body = utf8.encode(content.text);
+    out[1] = KIND_TEXT;
+    view.setUint32(10, body.length);
+    out.set(body, TEXT_HEADER);
+  } else {
+    const caption = utf8.encode(content.caption);
+    out[1] = KIND_IMAGE;
+    out[10] = MIME_CODES[content.mime];
+    view.setUint16(11, content.width);
+    view.setUint16(13, content.height);
+    view.setUint32(15, caption.length);
+    view.setUint32(19, content.data.length);
+    out.set(caption, IMAGE_HEADER);
+    out.set(content.data, IMAGE_HEADER + caption.length);
+  }
   return out;
 }
 
-export function unframeText(framed: Uint8Array): OpenedText {
+export function unframe(framed: Uint8Array): Opened {
   const view = new DataView(framed.buffer, framed.byteOffset, framed.byteLength);
-  if (framed.length < FRAME_HEADER || framed[0] !== VERSION || framed[1] !== KIND_TEXT) {
-    throw new Error('Unknown message format.');
+  const decode = (bytes: Uint8Array) => new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  if (framed.length < TEXT_HEADER || framed[0] !== VERSION) throw new Error('Unknown message format.');
+  const sentAt = view.getFloat64(2);
+  if (framed[1] === KIND_TEXT) {
+    const len = view.getUint32(10);
+    if (TEXT_HEADER + len > framed.length) throw new Error('Corrupt message frame.');
+    return { content: { kind: 'text', text: decode(framed.subarray(TEXT_HEADER, TEXT_HEADER + len)) }, sentAt };
   }
-  const len = view.getUint32(10);
-  if (FRAME_HEADER + len > framed.length) throw new Error('Corrupt message frame.');
-  const text = new TextDecoder('utf-8', { fatal: true }).decode(framed.subarray(FRAME_HEADER, FRAME_HEADER + len));
-  return { text, sentAt: view.getFloat64(2) };
+  if (framed[1] === KIND_IMAGE && framed.length >= IMAGE_HEADER) {
+    const mime = (Object.keys(MIME_CODES) as ImageMime[]).find((m) => MIME_CODES[m] === framed[10]);
+    const captionLen = view.getUint32(15);
+    const dataLen = view.getUint32(19);
+    if (!mime || IMAGE_HEADER + captionLen + dataLen > framed.length) throw new Error('Corrupt message frame.');
+    const caption = decode(framed.subarray(IMAGE_HEADER, IMAGE_HEADER + captionLen));
+    // Copy, so the image doesn't keep the whole padded frame alive.
+    const data = framed.slice(IMAGE_HEADER + captionLen, IMAGE_HEADER + captionLen + dataLen);
+    return { content: { kind: 'image', mime, width: view.getUint16(11), height: view.getUint16(13), data, caption }, sentAt };
+  }
+  throw new Error('Unknown message format.');
+}
+
+export function frameText(text: string, sentAt: number): Uint8Array {
+  return frame({ kind: 'text', text }, sentAt);
+}
+
+export function unframeText(framed: Uint8Array): { text: string; sentAt: number } {
+  const { content, sentAt } = unframe(framed);
+  if (content.kind !== 'text') throw new Error('Not a text message.');
+  return { text: content.text, sentAt };
 }
 
 /** Absolute pad range for a message, or an error if it escapes the side's half. */
