@@ -144,8 +144,19 @@ export function newPadSheet(onDone: (chatId: string) => void) {
     hwStatus,
     callout(
       'info',
-      'For example ', h('code', null, 'head -c 16M /dev/hwrng > trng.bin'), ', or the output of an Infinite Noise, OneRNG or ChaosKey device. ',
-      'Use its whitened output. Each file can only be mixed into one pad.',
+      h('div', null, h('b', null, 'Linux'), ' with a hardware RNG: ', h('code', null, 'head -c 16777216 /dev/hwrng > trng.bin')),
+      h(
+        'div',
+        { style: 'margin-top: 6px' },
+        h('b', null, 'macOS'), ' has no ', h('code', null, '/dev/hwrng'), '. Plug in a USB TRNG such as an Infinite Noise: ',
+        h('code', null, 'infnoise | head -c 16777216 > trng.bin'),
+      ),
+      h(
+        'div',
+        { style: 'margin-top: 6px' },
+        'Don’t use ', h('code', null, '/dev/random'), ' or ', h('code', null, '/dev/urandom'),
+        ': they’re software generators, the same kind your browser already uses. Each file can only be mixed into one pad.',
+      ),
     ),
   );
 
