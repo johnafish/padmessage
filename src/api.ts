@@ -48,35 +48,44 @@ export async function postMessage(
   return message;
 }
 
-/** Live feed with automatic reconnect. Calls `onReconnect` so callers can backfill. */
-export function subscribe(chatId: string, onMessage: (m: WireMessage) => void, onReconnect: () => void): () => void {
-  let sock: WebSocket | null = null;
+/**
+ * Live feed of new messages after `after`, over Server-Sent Events. The
+ * browser reconnects by itself and resumes from the last event it saw; if
+ * the server refuses outright (e.g. too many open chats) we retry with
+ * backoff. `onResync` fires when the server says we're too far behind for it
+ * to replay, so the caller should page through the history instead.
+ */
+export function subscribe(
+  chatId: string,
+  after: number,
+  onMessage: (m: WireMessage) => void,
+  onResync: () => void,
+): () => void {
+  let source: EventSource | null = null;
   let closed = false;
+  let lastSeq = after;
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let ping: ReturnType<typeof setInterval> | undefined;
 
   const connect = () => {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    sock = new WebSocket(`${proto}//${location.host}/ws/${chatId}`);
-    sock.onopen = () => {
-      if (retry > 0) onReconnect();
+    source = new EventSource(`/api/chats/${chatId}/events?after=${lastSeq}`);
+    source.onmessage = (e) => {
       retry = 0;
-      ping = setInterval(() => sock?.readyState === WebSocket.OPEN && sock.send('ping'), 25_000);
-    };
-    sock.onmessage = (e) => {
       try {
-        const data = JSON.parse(e.data);
-        if (data.type === 'message') onMessage(data.message);
+        const m = JSON.parse(e.data) as WireMessage;
+        lastSeq = Math.max(lastSeq, m.seq);
+        onMessage(m);
       } catch {
-        /* ignore malformed frames */
+        /* ignore malformed events */
       }
     };
-    sock.onclose = () => {
-      clearInterval(ping);
-      if (closed) return;
+    source.addEventListener('resync', onResync);
+    source.onerror = () => {
+      // Transient drops are retried by EventSource itself; only a refused
+      // connection leaves it CLOSED.
+      if (closed || source?.readyState !== EventSource.CLOSED) return;
       retry++;
-      timer = setTimeout(connect, Math.min(15_000, 500 * 2 ** retry));
+      timer = setTimeout(connect, Math.min(15_000, 1000 * 2 ** retry));
     };
   };
   connect();
@@ -84,7 +93,6 @@ export function subscribe(chatId: string, onMessage: (m: WireMessage) => void, o
   return () => {
     closed = true;
     clearTimeout(timer);
-    clearInterval(ping);
-    sock?.close();
+    source?.close();
   };
 }

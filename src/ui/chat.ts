@@ -419,14 +419,22 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   draw(true);
   textarea.focus();
 
+  // Messages are ingested strictly in arrival order: ingest is async (it may
+  // re-read the chat record), and history must not interleave with live events.
+  let queue = Promise.resolve();
+  const enqueue = (task: () => Promise<void>) => {
+    queue = queue.then(task).catch((err) => console.warn('update failed', err));
+  };
   const unsubscribe = subscribe(
     chatId,
-    async (m) => {
-      await ingest(m);
-      draw();
-      cb.onChanged();
-    },
-    () => void backfill(),
+    lastSeq,
+    (m) =>
+      enqueue(async () => {
+        await ingest(m);
+        draw();
+        cb.onChanged();
+      }),
+    () => enqueue(backfill),
   );
 
   return () => {

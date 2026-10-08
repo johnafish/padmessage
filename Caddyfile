@@ -1,0 +1,6 @@
+# Caddy terminates HTTPS (with an automatic Let's Encrypt certificate) and
+# forwards to PadMessage. Event streams pass straight through: Caddy flushes
+# text/event-stream responses immediately.
+{$DOMAIN} {
+	reverse_proxy padmessage:8787
+}

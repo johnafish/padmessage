@@ -1,0 +1,32 @@
+# PadMessage behind Caddy, which gets and renews the HTTPS certificate.
+#
+#   1. Point your domain's DNS at this server (ports 80 and 443 open).
+#   2. DOMAIN=chat.example.com docker compose up -d
+services:
+  padmessage:
+    build: .
+    restart: unless-stopped
+    environment:
+      TRUST_PROXY: "1" # rate-limit by the real client address Caddy forwards
+    volumes:
+      - padmessage-data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [padmessage]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the domain name pointing at this server}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  padmessage-data:
+  caddy-data:
+  caddy-config:

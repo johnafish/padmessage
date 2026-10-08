@@ -12,6 +12,8 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
     "types": ["node", "vite/client"]
   },
   "include": ["src", "server", "vite.config.ts"]

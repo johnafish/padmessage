@@ -5,11 +5,10 @@ Web messaging encrypted with one-time pads. Two people swap a pad file in person
 ```sh
 npm install
 npm run dev        # relay on :8787, app on http://localhost:5173
-npm test           # crypto tests (incl. RFC 8439 Poly1305 vector)
-npm run build && npm start   # production: relay serves dist/ on :8787 with a strict CSP
+npm test           # crypto and relay tests (incl. RFC 8439 Poly1305 vector)
 ```
 
-Requires Node 22.13+ (uses the built-in `node:sqlite`).
+Requires Node 22.18+. To run it on a server, see [Self-hosting](#self-hosting).
 
 ## How it works
 
@@ -27,7 +26,89 @@ Requires Node 22.13+ (uses the built-in `node:sqlite`).
 - **Pad identity.** `chatId = H("chat" ‖ H(pad))` is the server-visible room id. `fingerprint = H("fp" ‖ H(pad))` is shown to both people for comparison. `writeKey = H("write" ‖ H(pad))` is claimed on the relay trust-on-first-use, so people who only have the link can't post junk at future offsets.
 - **Delivery status.** Your latest message shows *Sending…* until the relay confirms it, then *Delivered*. Delivered means stored on the relay: it only replies to a send after the database write. It does not mean your partner has opened it. A failed send shows *Not delivered* with a retry, which uses fresh pad bytes.
 - **Collision detection.** If an authenticated message arrives from your own side that this device didn't send, sending pauses and a warning is shown.
-- **The relay** (`server/index.ts`) stores ciphertext in SQLite, refuses overlapping pad ranges per side, rate-limits writes and fans out over WebSockets.
+- **The relay** (`server/index.ts`) stores ciphertext in SQLite, refuses overlapping pad ranges per side, rate-limits writes and pushes new messages to open chats as Server-Sent Events. Browsers reconnect on their own and resume from the last message they saw (`Last-Event-ID`).
+
+## Self-hosting
+
+PadMessage is one Node process and one SQLite file. It calls no third-party services, and the server has no npm dependencies: it runs on Node's built-in modules alone.
+
+**You need:** a server with Node 22.18+ (or Docker), a domain name pointing at it, and **HTTPS**. Browsers only allow the cryptography PadMessage uses (WebCrypto, plus Web Locks and the camera) on HTTPS or `localhost`. Over plain HTTP the app shows an explanation instead of working, and the server warns at startup.
+
+### Option A: Docker with automatic HTTPS
+
+Caddy gets and renews a Let's Encrypt certificate for you.
+
+1. Point your domain's DNS at the server and open ports 80 and 443.
+2. In this directory:
+
+   ```sh
+   DOMAIN=chat.example.com docker compose up -d
+   ```
+
+Messages live in the `padmessage-data` volume. The image builds the app and runs the tests during the build. The final image contains only Node, `server/index.ts` and the built app, with no `node_modules`.
+
+### Option B: Node directly
+
+```sh
+npm ci && npm run build   # build tools are only needed for this step
+npm prune --omit=dev      # optional: removes them; the server needs none
+```
+
+Then serve it over HTTPS in one of two ways.
+
+**With your own certificate.** The server speaks HTTPS and HTTP/2 itself:
+
+```sh
+TLS_CERT=/etc/letsencrypt/live/chat.example.com/fullchain.pem \
+TLS_KEY=/etc/letsencrypt/live/chat.example.com/privkey.pem \
+PORT=8443 npm start
+```
+
+It re-reads the certificate files on `SIGHUP` and twice a day, so renewals need no restart.
+
+**Behind a reverse proxy** that handles HTTPS:
+
+```sh
+HOST=127.0.0.1 TRUST_PROXY=1 npm start
+```
+
+With Caddy, the whole site config is `chat.example.com { reverse_proxy 127.0.0.1:8787 }`. With nginx, enable `http2` on the HTTPS listener and use:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;      # live message stream
+    proxy_read_timeout 1h;
+}
+```
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `8787` | Port to listen on. |
+| `HOST` | all interfaces | Set `127.0.0.1` when a proxy on the same machine is the only client. |
+| `DATA_DIR` | `./data` | Where the SQLite database lives. |
+| `DIST_DIR` | `./dist` | The built app. |
+| `TLS_CERT`, `TLS_KEY` | unset | Certificate and key paths. Set both to serve HTTPS and HTTP/2 directly. |
+| `TRUST_PROXY` | off | `1` behind one reverse proxy: rate limits use the client address the proxy forwards (the last `X-Forwarded-For` entry), and HSTS is sent when the proxy reports HTTPS. |
+| `NODE_ENV` | unset | `production` serves the app. Otherwise the server is API-only and Vite serves the app in development. |
+
+### Operations
+
+- **Health check:** `GET /healthz` returns `ok`. The Docker image uses it.
+- **Backups:** copy `DATA_DIR`. To copy safely while running, use `sqlite3 padmessage.sqlite ".backup backup.sqlite"`.
+- **What the server stores:** ciphertext with its size and arrival time, chat IDs, and write-key hashes. Chat IDs and write keys are derived from the pad by hashing, so neither reveals it. The server never sees pads or plaintext, and there are no accounts. Client addresses are only held in memory, for rate limiting.
+- **Shutdown:** `SIGTERM` closes open streams and the database cleanly. Browsers reconnect when the server is back.
+
+### Dependencies
+
+- **Runtime:** none beyond Node's built-in `http`, `http2`, `sqlite` and `crypto`. The `dependencies` list in `package.json` is empty, so a production install installs nothing.
+- **Build:** Vite and TypeScript, plus `@noble/ciphers` (an audited Poly1305 implementation), which is compiled into the browser bundle. Tests use Vitest.
+- **Optional:** the Docker setup uses the `node:24-alpine` and `caddy:2` images.
 
 ## Glass primitives
 

@@ -33,10 +33,37 @@ const app = h(
   pane,
 );
 
-document.body.append(
-  h('div', { class: 'backdrop', 'aria-hidden': 'true' }),
-  app,
-);
+// Browsers only expose WebCrypto, Web Locks and the camera on secure origins
+// (HTTPS, or localhost). Without them nothing can work, so say so plainly
+// rather than failing on the first click.
+const secure = window.isSecureContext && !!crypto.subtle;
+
+document.body.append(h('div', { class: 'backdrop', 'aria-hidden': 'true' }), secure ? app : insecureNotice());
+
+function insecureNotice() {
+  return h(
+    'div',
+    { class: 'center' },
+    h(
+      'div',
+      { class: 'hero glass' },
+      h('div', { class: 'hero-orb glass glass--tinted' }, icon('lock')),
+      h('h1', null, 'PadMessage needs a secure connection.'),
+      h(
+        'p',
+        null,
+        'Browsers only allow the encryption PadMessage relies on over HTTPS. This page was opened over plain HTTP, so it can’t create or open pads.',
+      ),
+      location.protocol === 'http:' &&
+        h(
+          'div',
+          { class: 'hero-actions' },
+          h('a', { class: 'btn glass glass--tinted glass--pill glass--interactive', href: location.href.replace(/^http:/, 'https:') }, 'Open the HTTPS address'),
+        ),
+      h('p', { class: 'hero-note' }, 'Running your own server? See “Self-hosting” in the README.'),
+    ),
+  );
+}
 
 // ---------- routing ----------
 
@@ -170,4 +197,4 @@ function renderLocked(chatId: string) {
     .catch(() => count.remove());
 }
 
-void route();
+if (secure) void route();

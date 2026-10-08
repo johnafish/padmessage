@@ -1,25 +1,41 @@
-// Ciphertext relay. The server never sees pads or plaintext: it stores sealed
+// PadMessage relay. The server never sees pads or plaintext: it stores sealed
 // messages per chat, refuses any message whose pad range overlaps one already
 // stored for the same side (a cheap guard against client bugs that would
-// reuse pad bytes), and fans new messages out over WebSockets.
+// reuse pad bytes), and pushes new messages to open chats as Server-Sent
+// Events.
+//
+// No npm dependencies: it runs on plain Node 22.18+ (`node server/index.ts`;
+// Node strips the TypeScript types itself) using only built-in modules.
+// Configuration is by environment variable; see "Self-hosting" in the README.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { extname, join, normalize, resolve } from 'node:path';
+import { createSecureServer, type Http2ServerRequest, type Http2ServerResponse } from 'node:http2';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { WebSocketServer, type WebSocket } from 'ws';
 
-const PORT = Number(process.env.PORT ?? 8787);
-const PROD = process.env.NODE_ENV === 'production';
-const DATA_DIR = resolve(process.env.DATA_DIR ?? 'data');
-const DIST_DIR = resolve('dist');
+const env = process.env;
+const PORT = Number(env.PORT ?? 8787);
+const HOST = env.HOST || undefined; // all interfaces unless set
+const PROD = env.NODE_ENV === 'production';
+const DATA_DIR = resolve(env.DATA_DIR ?? 'data');
+const DIST_DIR = resolve(env.DIST_DIR ?? 'dist');
+const TLS_CERT = env.TLS_CERT;
+const TLS_KEY = env.TLS_KEY;
+/** Behind one reverse proxy, take the client address from the last X-Forwarded-For entry. */
+const TRUST_PROXY = env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true';
+
+if (!TLS_CERT !== !TLS_KEY) throw new Error('Set both TLS_CERT and TLS_KEY, or neither.');
+const TLS = !!(TLS_CERT && TLS_KEY);
 
 const MAC_KEY_BYTES = 32;
 const TAG_BYTES = 16;
 const MAX_CT_BYTES = 32 * 1024;
 const MAX_BODY_BYTES = 64 * 1024;
 const PAGE_LIMIT = 500;
+const STREAM_PING_MS = 25_000;
+const MAX_STREAMS_PER_IP = 32;
 const CHAT_ID = /^[A-Za-z0-9_-]{22}$/;
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -57,6 +73,14 @@ const insertStmt = db.prepare(
 
 const getChatStmt = db.prepare('SELECT write_hash FROM chats WHERE chat_id = ?');
 const claimStmt = db.prepare('INSERT INTO chats (chat_id, write_hash, created_at) VALUES (?, ?, ?)');
+
+class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
 /**
  * Chats are claimed trust-on-first-use by the first client to present a
@@ -96,12 +120,6 @@ function toWire(row: Row): WireMessage {
   };
 }
 
-class HttpError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-  }
-}
-
 function postMessage(chatId: string, body: unknown): WireMessage {
   const { side, offset, ct, tag } = (body ?? {}) as Record<string, unknown>;
   if (side !== 0 && side !== 1) throw new HttpError(400, 'side must be 0 or 1');
@@ -130,6 +148,31 @@ function postMessage(chatId: string, body: unknown): WireMessage {
   };
 }
 
+// --- request helpers --------------------------------------------------------
+
+function header(req: IncomingMessage, name: string): string | undefined {
+  const v = req.headers[name];
+  return Array.isArray(v) ? v[0] : v;
+}
+
+function clientIp(req: IncomingMessage): string {
+  if (TRUST_PROXY) {
+    // The proxy appends the address it saw, so the last entry is the one a
+    // client can't forge (earlier entries are whatever the client sent).
+    const hops = (header(req, 'x-forwarded-for') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (hops.length) return hops[hops.length - 1];
+  }
+  return req.socket.remoteAddress ?? '?';
+}
+
+function isHttps(req: IncomingMessage): boolean {
+  return TLS || (TRUST_PROXY && header(req, 'x-forwarded-proto') === 'https');
+}
+
+function intParam(v: string | null | undefined): number {
+  return Math.max(0, Math.floor(Number(v) || 0));
+}
+
 // --- rate limiting: a token bucket per client address --------------------
 
 const buckets = new Map<string, { tokens: number; at: number }>();
@@ -148,12 +191,56 @@ setInterval(() => {
   for (const [ip, b] of buckets) if (b.at < cutoff) buckets.delete(ip);
 }, 60_000).unref();
 
-// --- realtime fan-out -----------------------------------------------------
+// --- live updates: Server-Sent Events ---------------------------------------
+// One-way push is all a chat needs, and SSE is plain HTTP: no library, it
+// passes through any reverse proxy, and the browser reconnects on its own,
+// sending Last-Event-ID so the stream can replay whatever it missed.
 
-const rooms = new Map<string, Set<WebSocket>>();
+const rooms = new Map<string, Set<ServerResponse>>();
+const streamsByIp = new Map<string, number>();
+
+function eventFrame(msg: WireMessage): string {
+  return `id: ${msg.seq}\ndata: ${JSON.stringify(msg)}\n\n`;
+}
+
+function openStream(req: IncomingMessage, res: ServerResponse, chatId: string, url: URL) {
+  const ip = clientIp(req);
+  const open = streamsByIp.get(ip) ?? 0;
+  if (open >= MAX_STREAMS_PER_IP) throw new HttpError(429, 'too many open streams');
+  const after = Math.max(intParam(url.searchParams.get('after')), intParam(header(req, 'last-event-id')));
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Accel-Buffering': 'no', // tell nginx not to buffer the stream
+  });
+  // Replay and join the room in one synchronous block: node:sqlite is
+  // synchronous, so no message can be stored between the query and the join.
+  const rows = listStmt.all(chatId, after, PAGE_LIMIT) as Row[];
+  let frames = 'retry: 3000\n\n' + rows.map((r) => eventFrame(toWire(r))).join('');
+  // Too far behind to replay in one go: the client pages the rest over GET.
+  if (rows.length === PAGE_LIMIT) frames += 'event: resync\ndata: {}\n\n';
+  res.write(frames);
+
+  const room = rooms.get(chatId) ?? new Set();
+  rooms.set(chatId, room);
+  room.add(res);
+  streamsByIp.set(ip, open + 1);
+  // Comment lines keep idle proxies and load balancers from closing the stream.
+  const ping = setInterval(() => res.write(': ping\n\n'), STREAM_PING_MS);
+  res.on('close', () => {
+    clearInterval(ping);
+    room.delete(res);
+    if (room.size === 0) rooms.delete(chatId);
+    const left = (streamsByIp.get(ip) ?? 1) - 1;
+    if (left > 0) streamsByIp.set(ip, left);
+    else streamsByIp.delete(ip);
+  });
+}
+
 function broadcast(chatId: string, msg: WireMessage) {
-  const payload = JSON.stringify({ type: 'message', message: msg });
-  for (const sock of rooms.get(chatId) ?? []) if (sock.readyState === sock.OPEN) sock.send(payload);
+  const frame = eventFrame(msg);
+  for (const res of rooms.get(chatId) ?? []) res.write(frame);
 }
 
 // --- http -----------------------------------------------------------------
@@ -164,7 +251,7 @@ const SECURITY_HEADERS: Record<string, string> = {
     "script-src 'self'",
     "style-src 'self'",
     "img-src 'self' data: blob:",
-    "connect-src 'self' ws: wss:",
+    "connect-src 'self'",
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'none'",
@@ -177,6 +264,7 @@ const SECURITY_HEADERS: Record<string, string> = {
 };
 
 function sendJson(res: ServerResponse, status: number, data: unknown) {
+  if (res.headersSent) return void res.end();
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
 }
@@ -215,43 +303,58 @@ const MIME: Record<string, string> = {
   '.webmanifest': 'application/manifest+json',
 };
 
-function serveStatic(req: IncomingMessage, res: ServerResponse) {
-  const urlPath = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname);
+function serveStatic(req: IncomingMessage, res: ServerResponse, pathname: string) {
+  let urlPath: string;
+  try {
+    urlPath = decodeURIComponent(pathname);
+  } catch {
+    throw new HttpError(400, 'bad path');
+  }
   let file = normalize(join(DIST_DIR, urlPath));
-  if (!file.startsWith(DIST_DIR)) return sendJson(res, 404, { error: 'not found' });
+  if (file !== DIST_DIR && !file.startsWith(DIST_DIR + sep)) throw new HttpError(404, 'not found');
   const isAsset = existsSync(file) && statSync(file).isFile();
   if (!isAsset) file = join(DIST_DIR, 'index.html'); // SPA fallback for /c/<id> etc.
-  if (!existsSync(file)) return sendJson(res, 404, { error: 'run `npm run build` first' });
+  if (!existsSync(file)) throw new HttpError(404, 'run `npm run build` first');
   res.writeHead(200, {
     ...SECURITY_HEADERS,
+    ...(isHttps(req) ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}),
     'Content-Type': MIME[extname(file)] ?? 'application/octet-stream',
-    'Cache-Control': file.includes(`${DIST_DIR}/assets/`) ? 'public, max-age=31536000, immutable' : 'no-cache',
+    'Cache-Control': file.startsWith(join(DIST_DIR, 'assets') + sep) ? 'public, max-age=31536000, immutable' : 'no-cache',
   });
   createReadStream(file).pipe(res);
 }
 
-const server = createServer(async (req, res) => {
+async function handle(req: IncomingMessage, res: ServerResponse) {
   try {
     const url = new URL(req.url ?? '/', 'http://x');
+    if (url.pathname === '/healthz') {
+      db.prepare('SELECT 1').get();
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+      return void res.end('ok');
+    }
     const chatMatch = url.pathname.match(/^\/api\/chats\/([^/]+)$/);
     if (chatMatch && req.method === 'PUT') {
       if (!CHAT_ID.test(chatMatch[1])) throw new HttpError(400, 'bad chat id');
-      if (!allow(req.socket.remoteAddress ?? '?')) throw new HttpError(429, 'slow down');
+      if (!allow(clientIp(req))) throw new HttpError(429, 'slow down');
       const body = (await readJson(req)) as { writeKey?: unknown } | null;
       checkWriteKey(chatMatch[1], body?.writeKey);
       return sendJson(res, 200, { ok: true });
+    }
+    const streamMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/events$/);
+    if (streamMatch && req.method === 'GET') {
+      if (!CHAT_ID.test(streamMatch[1])) throw new HttpError(400, 'bad chat id');
+      return openStream(req, res, streamMatch[1], url);
     }
     const match = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages$/);
     if (match) {
       const chatId = match[1];
       if (!CHAT_ID.test(chatId)) throw new HttpError(400, 'bad chat id');
       if (req.method === 'GET') {
-        const after = Math.max(0, Number(url.searchParams.get('after') ?? 0) || 0);
-        const rows = listStmt.all(chatId, after, PAGE_LIMIT) as Row[];
+        const rows = listStmt.all(chatId, intParam(url.searchParams.get('after')), PAGE_LIMIT) as Row[];
         return sendJson(res, 200, { messages: rows.map(toWire), more: rows.length === PAGE_LIMIT });
       }
       if (req.method === 'POST') {
-        if (!allow(req.socket.remoteAddress ?? '?')) throw new HttpError(429, 'slow down');
+        if (!allow(clientIp(req))) throw new HttpError(429, 'slow down');
         checkWriteKey(chatId, req.headers['x-write-key']);
         const msg = postMessage(chatId, await readJson(req));
         broadcast(chatId, msg);
@@ -260,29 +363,61 @@ const server = createServer(async (req, res) => {
       throw new HttpError(405, 'method not allowed');
     }
     if (url.pathname.startsWith('/api/')) throw new HttpError(404, 'not found');
-    if (PROD) return serveStatic(req, res);
+    if (PROD) return serveStatic(req, res, url.pathname);
     sendJson(res, 404, { error: 'in development, open the Vite server on :5173' });
   } catch (err) {
     const status = err instanceof HttpError ? err.status : 500;
     if (status === 500) console.error(err);
     sendJson(res, status, { error: err instanceof Error ? err.message : 'error' });
   }
-});
+}
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 });
-server.on('upgrade', (req, socket, head) => {
-  const chatId = new URL(req.url ?? '/', 'http://x').pathname.match(/^\/ws\/([^/]+)$/)?.[1];
-  if (!chatId || !CHAT_ID.test(chatId)) return socket.destroy();
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    const room = rooms.get(chatId) ?? new Set();
-    rooms.set(chatId, room);
-    room.add(ws);
-    ws.on('close', () => {
-      room.delete(ws);
-      if (room.size === 0) rooms.delete(chatId);
-    });
-    ws.on('message', () => {}); // clients only listen; pings keep proxies happy
+// --- server ----------------------------------------------------------------
+
+const loadTls = () => ({ cert: readFileSync(TLS_CERT!), key: readFileSync(TLS_KEY!) });
+
+// With certificates, serve HTTP/2 (falling back to HTTP/1.1). Node's HTTP/2
+// compatibility API mirrors http's request/response objects, so one handler
+// serves both. HTTP/2 also lifts browsers' six-connections-per-host limit,
+// which matters for event streams with many tabs open.
+const server = TLS
+  ? createSecureServer({ ...loadTls(), allowHTTP1: true }, handle as unknown as (req: Http2ServerRequest, res: Http2ServerResponse) => void)
+  : createServer(handle);
+
+if (TLS) {
+  // Certificates renew (Let's Encrypt every ~60 days). Pick up new files
+  // without a restart: on SIGHUP, and twice a day regardless.
+  const reload = (announce: boolean) => {
+    try {
+      (server as ReturnType<typeof createSecureServer>).setSecureContext(loadTls());
+      if (announce) console.log('Reloaded TLS certificate.');
+    } catch (err) {
+      console.error('Reloading the TLS certificate failed; keeping the old one.', err);
+    }
+  };
+  process.on('SIGHUP', () => reload(true));
+  setInterval(() => reload(false), 12 * 60 * 60 * 1000).unref();
+}
+
+function shutdown() {
+  for (const room of rooms.values()) for (const res of room) res.end();
+  server.close(() => {
+    db.close();
+    process.exit(0);
   });
-});
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
-server.listen(PORT, () => console.log(`padmessage relay on http://localhost:${PORT}${PROD ? '' : ' (dev)'}`));
+server.listen(PORT, HOST, () => {
+  const where = `${TLS ? 'https' : 'http'}://${HOST ?? 'localhost'}:${PORT}`;
+  console.log(`PadMessage relay listening on ${where}${PROD ? '' : ' (development: API only)'}`);
+  if (PROD && !existsSync(join(DIST_DIR, 'index.html'))) console.warn(`No app build in ${DIST_DIR}. Run \`npm run build\` first.`);
+  if (PROD && !TLS && !TRUST_PROXY) {
+    console.warn(
+      'Serving plain HTTP. Browsers only run PadMessage over HTTPS (localhost excepted): ' +
+        'put it behind a TLS proxy and set TRUST_PROXY=1, or set TLS_CERT and TLS_KEY.',
+    );
+  }
+});
