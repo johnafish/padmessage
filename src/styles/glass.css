@@ -1,0 +1,211 @@
+/* Glass primitives.
+ *
+ * A glass surface is four layers:
+ *   1. the material: a translucent fill with backdrop blur and saturation,
+ *      so colour from behind bleeds through;
+ *   2. the rim: a 1px gradient border, bright where light hits the top-left
+ *      edge and fading round the body (::before, masked to the border box);
+ *   3. the sheen: a soft specular highlight that follows the pointer on
+ *      interactive glass (::after, positioned by --mx / --my);
+ *   4. depth: an inset top highlight plus a soft drop shadow.
+ *
+ * Variants change the recipe, not the structure:
+ *   .glass            regular: panels, sheets, bars
+ *   .glass--clear     thin: floats over busy content, keeps most colour
+ *   .glass--thick     heavy: modals, anything that needs legibility first
+ *   .glass--tinted    accent-coloured material (sent bubbles, primary buttons)
+ *   .glass--pill      fully rounded
+ *   .glass--interactive  hover lift, pointer sheen, press squish
+ */
+
+:root {
+  --glass-fill: hsl(0 0% 100% / 0.1);
+  --glass-fill-strong: hsl(0 0% 100% / 0.16);
+  --glass-blur: 22px;
+  --glass-saturate: 170%;
+  --glass-rim-hi: hsl(0 0% 100% / 0.55);
+  --glass-rim-lo: hsl(0 0% 100% / 0.06);
+  --glass-inset: hsl(0 0% 100% / 0.22);
+  --glass-shadow: 0 10px 40px -12px hsl(240 60% 4% / 0.55), 0 2px 6px -2px hsl(240 60% 4% / 0.3);
+  --glass-radius: 22px;
+  --glass-tint: var(--accent);
+  --glass-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --glass-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --glass-fill: hsl(0 0% 100% / 0.42);
+    --glass-fill-strong: hsl(0 0% 100% / 0.6);
+    --glass-rim-hi: hsl(0 0% 100% / 0.95);
+    --glass-rim-lo: hsl(0 0% 100% / 0.25);
+    --glass-inset: hsl(0 0% 100% / 0.7);
+    --glass-shadow: 0 10px 40px -14px hsl(250 40% 30% / 0.35), 0 2px 6px -2px hsl(250 40% 30% / 0.15);
+  }
+}
+:root[data-theme='light'] {
+  --glass-fill: hsl(0 0% 100% / 0.42);
+  --glass-fill-strong: hsl(0 0% 100% / 0.6);
+  --glass-rim-hi: hsl(0 0% 100% / 0.95);
+  --glass-rim-lo: hsl(0 0% 100% / 0.25);
+  --glass-inset: hsl(0 0% 100% / 0.7);
+  --glass-shadow: 0 10px 40px -14px hsl(250 40% 30% / 0.35), 0 2px 6px -2px hsl(250 40% 30% / 0.15);
+}
+
+.glass {
+  --_fill: var(--glass-fill);
+  --_blur: var(--glass-blur);
+  position: relative;
+  isolation: isolate;
+  border-radius: var(--glass-radius);
+  background: var(--_fill);
+  -webkit-backdrop-filter: blur(var(--_blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--_blur)) saturate(var(--glass-saturate));
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-inset),
+    inset 0 -1px 0 0 var(--glass-rim-lo),
+    var(--glass-shadow);
+}
+
+/* Rim light. */
+.glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    150deg,
+    var(--glass-rim-hi) 0%,
+    var(--glass-rim-lo) 32%,
+    transparent 55%,
+    var(--glass-rim-lo) 80%,
+    color-mix(in srgb, var(--glass-rim-hi) 60%, transparent) 100%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  pointer-events: none;
+}
+
+/* Sheen. Static on plain glass, pointer-tracked on interactive glass. */
+.glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: radial-gradient(
+    140% 90% at var(--mx, 30%) var(--my, -20%),
+    hsl(0 0% 100% / 0.14),
+    transparent 55%
+  );
+  pointer-events: none;
+  transition: opacity 0.4s var(--glass-ease);
+}
+
+.glass--clear {
+  --_fill: color-mix(in srgb, var(--glass-fill) 45%, transparent);
+  --_blur: 12px;
+}
+
+.glass--thick {
+  --_fill: var(--glass-fill-strong);
+  --_blur: 40px;
+}
+
+.glass--tinted {
+  --_fill: color-mix(in srgb, var(--glass-tint) 62%, transparent);
+  color: var(--on-accent);
+}
+.glass--tinted::after {
+  background: radial-gradient(
+    140% 90% at var(--mx, 30%) var(--my, -20%),
+    hsl(0 0% 100% / 0.32),
+    transparent 60%
+  );
+}
+
+.glass--pill {
+  border-radius: 999px;
+}
+
+.glass--interactive {
+  cursor: pointer;
+  transition:
+    transform 0.45s var(--glass-spring),
+    box-shadow 0.3s var(--glass-ease),
+    background-color 0.3s var(--glass-ease);
+  -webkit-tap-highlight-color: transparent;
+}
+.glass--interactive::after {
+  opacity: 0.6;
+}
+@media (hover: hover) {
+  .glass--interactive:hover {
+    transform: translateY(-1px) scale(1.015);
+  }
+  .glass--interactive:hover::after {
+    opacity: 1;
+  }
+}
+.glass--interactive:active {
+  transform: scale(0.96);
+  transition-duration: 0.12s;
+}
+.glass--interactive:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.glass--interactive:disabled,
+.glass--interactive[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.45;
+  transform: none;
+}
+
+/* Inset well for inputs: glass pressed into the surface. */
+.glass-well {
+  border-radius: 16px;
+  background: hsl(0 0% 0% / 0.18);
+  box-shadow:
+    inset 0 1px 2px hsl(0 0% 0% / 0.25),
+    inset 0 0 0 1px hsl(0 0% 100% / 0.06),
+    0 1px 0 hsl(0 0% 100% / 0.08);
+  transition: box-shadow 0.25s var(--glass-ease), background-color 0.25s var(--glass-ease);
+}
+.glass-well:focus-within {
+  box-shadow:
+    inset 0 1px 2px hsl(0 0% 0% / 0.25),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent),
+    0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) .glass-well {
+    background: hsl(240 30% 20% / 0.06);
+  }
+}
+:root[data-theme='light'] .glass-well {
+  background: hsl(240 30% 20% / 0.06);
+}
+
+/* Accessibility: users who ask for less transparency get solid surfaces. */
+@media (prefers-reduced-transparency: reduce) {
+  .glass {
+    --_fill: var(--surface-solid) !important;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .glass--tinted {
+    --_fill: var(--glass-tint) !important;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .glass--interactive,
+  .glass--interactive:hover,
+  .glass--interactive:active {
+    transform: none;
+    transition: none;
+  }
+}
