@@ -34,7 +34,7 @@ const app = h(
 );
 
 document.body.append(
-  h('div', { class: 'backdrop', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'), h('span')),
+  h('div', { class: 'backdrop', 'aria-hidden': 'true' }),
   app,
 );
 

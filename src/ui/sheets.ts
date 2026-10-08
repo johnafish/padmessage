@@ -125,7 +125,7 @@ export function newPadSheet(onDone: (chatId: string) => void) {
   );
 
   // Hardware randomness: raw bytes from a TRNG device, mixed in by XOR.
-  const hwInput = h('input', { type: 'file', class: 'sr-only' });
+  const hwInput = h('input', { type: 'file', hidden: true });
   const hwStatus = h('div', { 'aria-live': 'polite' });
   const hwZone = h(
     'button',
@@ -342,7 +342,7 @@ interface ImportOptions {
 
 export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOptions = {}) {
   const sheet = openSheet('Load a pad');
-  const fileInput = h('input', { type: 'file', class: 'sr-only', accept: '.pad,application/octet-stream,*/*' });
+  const fileInput = h('input', { type: 'file', hidden: true, accept: '.pad,application/octet-stream,*/*' });
   const status = h('div', { 'aria-live': 'polite' });
   const zone = h(
     'button',

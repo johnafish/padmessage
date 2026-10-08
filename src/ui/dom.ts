@@ -105,8 +105,8 @@ export function download(bytes: Uint8Array, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-/** Deterministic avatar colours and initials from a chat id. */
-export function avatar(name: string, chatId: string, size = 44): HTMLElement {
+/** Deterministic avatar colours and initials from a chat id. Size comes from CSS (--size). */
+export function avatar(name: string, chatId: string): HTMLElement {
   let hash = 0;
   for (const ch of chatId) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
   const hue = hash % 360;
@@ -122,7 +122,7 @@ export function avatar(name: string, chatId: string, size = 44): HTMLElement {
     'div',
     {
       class: 'avatar',
-      style: `--size:${size}px;--a1:hsl(${hue} 85% 62%);--a2:hsl(${(hue + 50) % 360} 85% 52%)`,
+      style: `--a1:hsl(${hue} 85% 62%);--a2:hsl(${(hue + 50) % 360} 85% 52%)`,
       'aria-hidden': 'true',
     },
     initials,
@@ -166,6 +166,6 @@ export function sourceChip(source: PadSource | undefined) {
     'span',
     { class: 'source-chip', 'data-source': key, title: SOURCE_INFO[key].detail },
     icon(key === 'mixed' ? 'shield' : key === 'csprng' ? 'lock' : 'alert'),
-    SOURCE_INFO[key].label,
+    h('span', { class: 'chip-label' }, SOURCE_INFO[key].label),
   );
 }

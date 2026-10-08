@@ -33,8 +33,9 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
 
   // ----- layout -----
 
-  let av = avatar(chat.name, chatId, 40);
-  const live = h('span', { class: 'live', 'data-online': 'false' }, 'Connecting');
+  let av = avatar(chat.name, chatId);
+  const liveLabel = h('span', { class: 'chip-label' }, 'Connecting');
+  const live = h('span', { class: 'live', 'data-online': 'false' }, liveLabel);
   const nameEl = h('div', { class: 'chat-head-name' }, chat.name);
   const gauge = h('div', { class: 'gauge' });
   const gaugeLabel = h('span', { class: 'gauge-label' });
@@ -59,7 +60,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       h(
         'div',
         { class: 'chat-head-sub' },
-        h('span', { class: 'side-chip', 'data-side': chat.side, title: `You send with the ${SIDE_NAMES[chat.side]} half of the pad` }, sideIcon(chat.side), SIDE_NAMES[chat.side]),
+        h('span', { class: 'side-chip', 'data-side': chat.side, title: `You send with the ${SIDE_NAMES[chat.side]} half of the pad` }, sideIcon(chat.side), h('span', { class: 'chip-label' }, SIDE_NAMES[chat.side])),
         sourceChip(chat.source),
         h('span', { class: 'fingerprint', title: 'Pad fingerprint' }, chat.fingerprint),
         live,
@@ -71,7 +72,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       gaugeWrap,
       h(
         'button',
-        { class: 'btn btn--icon btn--sm glass glass--clear glass--pill glass--interactive', 'aria-label': 'Copy chat link', title: 'Copy chat link', onclick: copyLink },
+        { class: 'copy-link btn btn--icon btn--sm glass glass--clear glass--pill glass--interactive', 'aria-label': 'Copy chat link', title: 'Copy chat link', onclick: copyLink },
         icon('link'),
       ),
       menuAnchor,
@@ -97,6 +98,16 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
 
   const root = h('section', { class: 'chat' }, head, banner, list, composer);
   container.replaceChildren(root);
+
+  // The header and composer float over the list and change height (header
+  // compaction, a multi-line draft), so the list's padding tracks them.
+  const spacing = new ResizeObserver(() => {
+    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+    root.style.setProperty('--head-space', `${head.offsetTop + head.offsetHeight}px`);
+    root.style.setProperty('--composer-space', `${root.clientHeight - composer.offsetTop}px`);
+    if (nearBottom) list.scrollTop = list.scrollHeight;
+  });
+  [root, head, composer].forEach((el) => spacing.observe(el));
 
   // ----- pad accounting -----
 
@@ -328,7 +339,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       item('edit', 'Rename', () => renameSheet(chat, async () => {
         chat = (await getChat(chatId)) ?? chat;
         nameEl.textContent = chat.name;
-        const fresh = avatar(chat.name, chatId, 40);
+        const fresh = avatar(chat.name, chatId);
         av.replaceWith(fresh);
         av = fresh;
         cb.onChanged();
@@ -411,7 +422,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     },
     (online) => {
       live.dataset.online = String(online);
-      live.textContent = online ? 'Live' : 'Reconnecting';
+      liveLabel.textContent = online ? 'Live' : 'Reconnecting';
       live.title = online ? 'Connected to the relay' : 'Not connected to the relay';
     },
     () => void backfill(),
@@ -419,6 +430,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
 
   return () => {
     unsubscribe();
+    spacing.disconnect();
     closeMenu();
   };
 }
