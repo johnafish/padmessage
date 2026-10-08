@@ -2,19 +2,19 @@
 
 :root {
   color-scheme: dark light;
-  --bg: hsl(240 24% 7%);
-  --surface-solid: hsl(248 30% 16%);
-  --text: hsl(240 30% 97%);
-  --text-2: hsl(240 15% 78% / 0.78);
-  --text-3: hsl(240 15% 80% / 0.62);
-  --accent: hsl(256 92% 66%);
+  --bg: hsl(220 24% 7%);
+  --surface-solid: hsl(220 30% 16%);
+  --text: hsl(220 30% 97%);
+  --text-2: hsl(220 15% 78% / 0.78);
+  --text-3: hsl(220 15% 80% / 0.62);
+  --accent: hsl(212 100% 60%);
   --accent-2: hsl(178 80% 52%);
   --on-accent: #fff;
   --danger: hsl(352 90% 64%);
   --warn: hsl(38 95% 60%);
   --ok: hsl(150 70% 50%);
   --cam: hsl(178 65% 58%);
-  --pool-1: hsl(258 45% 26% / 0.6);
+  --pool-1: hsl(216 60% 24% / 0.6);
   --pool-2: hsl(192 50% 18% / 0.55);
   --pane: hsl(0 0% 100% / 0.025);
   --hairline: hsl(0 0% 100% / 0.08);
@@ -25,17 +25,17 @@
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) {
-    --bg: hsl(240 24% 96%);
-    --surface-solid: hsl(250 40% 98%);
-    --text: hsl(248 40% 12%);
-    --text-2: hsl(248 20% 28% / 0.8);
-    --text-3: hsl(248 15% 35% / 0.55);
-    --accent: hsl(256 80% 58%);
-    --pool-1: hsl(258 70% 88% / 0.7);
+    --bg: hsl(220 24% 96%);
+    --surface-solid: hsl(220 40% 98%);
+    --text: hsl(220 40% 12%);
+    --text-2: hsl(220 20% 28% / 0.8);
+    --text-3: hsl(220 15% 35% / 0.55);
+    --accent: hsl(214 92% 41%);
+    --pool-1: hsl(212 85% 87% / 0.7);
     --pool-2: hsl(188 55% 85% / 0.6);
     --pane: hsl(0 0% 100% / 0.2);
-    --hairline: hsl(248 30% 20% / 0.08);
-    --subtle: hsl(240 20% 20% / 0.06);
+    --hairline: hsl(220 30% 20% / 0.08);
+    --subtle: hsl(220 20% 20% / 0.06);
     --cam: hsl(184 85% 28%);
     --ok: hsl(150 75% 30%);
     --warn: hsl(32 95% 38%);
@@ -43,17 +43,17 @@
   }
 }
 :root[data-theme='light'] {
-  --bg: hsl(240 24% 96%);
-  --surface-solid: hsl(250 40% 98%);
-  --text: hsl(248 40% 12%);
-  --text-2: hsl(248 20% 28% / 0.8);
-  --text-3: hsl(248 15% 35% / 0.55);
-  --accent: hsl(256 80% 58%);
-  --pool-1: hsl(258 70% 88% / 0.7);
+  --bg: hsl(220 24% 96%);
+  --surface-solid: hsl(220 40% 98%);
+  --text: hsl(220 40% 12%);
+  --text-2: hsl(220 20% 28% / 0.8);
+  --text-3: hsl(220 15% 35% / 0.55);
+  --accent: hsl(214 92% 41%);
+  --pool-1: hsl(212 85% 87% / 0.7);
   --pool-2: hsl(188 55% 85% / 0.6);
   --pane: hsl(0 0% 100% / 0.2);
-  --hairline: hsl(248 30% 20% / 0.08);
-  --subtle: hsl(240 20% 20% / 0.06);
+  --hairline: hsl(220 30% 20% / 0.08);
+  --subtle: hsl(220 20% 20% / 0.06);
   --cam: hsl(184 85% 28%);
   --ok: hsl(150 75% 30%);
   --warn: hsl(32 95% 38%);
@@ -205,11 +205,11 @@ button {
   border-radius: 9px;
   display: grid;
   place-items: center;
-  background: linear-gradient(160deg, hsl(256 72% 60%), hsl(250 68% 42%));
+  background: linear-gradient(160deg, hsl(212 92% 56%), hsl(222 78% 42%));
   box-shadow:
     inset 0 1px 0 hsl(0 0% 100% / 0.3),
     inset 0 0 0 1px hsl(0 0% 100% / 0.08),
-    0 1px 3px hsl(250 60% 15% / 0.4);
+    0 1px 3px hsl(220 60% 15% / 0.4);
 }
 .brand-mark svg {
   width: 20px;
@@ -983,7 +983,7 @@ button {
   display: grid;
   place-items: center;
   padding: 16px;
-  background: hsl(248 50% 4% / 0.35);
+  background: hsl(220 50% 4% / 0.35);
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   /* Animate colour, not opacity: an opacity < 1 ancestor becomes a backdrop
@@ -1256,11 +1256,11 @@ button {
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) .scrim {
-    background: hsl(250 60% 96% / 0.35);
+    background: hsl(220 60% 96% / 0.35);
   }
 }
 :root[data-theme='light'] .scrim {
-  background: hsl(250 60% 96% / 0.35);
+  background: hsl(220 60% 96% / 0.35);
 }
 
 .source-chip {
@@ -1404,7 +1404,7 @@ button {
   display: grid;
   place-items: center;
   padding: 64px 16px 72px;
-  background: hsl(240 30% 4% / 0.86);
+  background: hsl(220 30% 4% / 0.86);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   animation: scrim-in 0.25s var(--glass-ease) both;

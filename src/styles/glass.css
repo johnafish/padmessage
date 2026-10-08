@@ -26,7 +26,7 @@
   --glass-rim-hi: hsl(0 0% 100% / 0.55);
   --glass-rim-lo: hsl(0 0% 100% / 0.06);
   --glass-inset: hsl(0 0% 100% / 0.22);
-  --glass-shadow: 0 10px 40px -12px hsl(240 60% 4% / 0.55), 0 2px 6px -2px hsl(240 60% 4% / 0.3);
+  --glass-shadow: 0 10px 40px -12px hsl(220 60% 4% / 0.55), 0 2px 6px -2px hsl(220 60% 4% / 0.3);
   --glass-radius: 22px;
   --glass-tint: var(--accent);
   /* How opaque tinted glass is. Denser in light mode, where the tint sits over a
@@ -43,7 +43,7 @@
     --glass-rim-hi: hsl(0 0% 100% / 0.95);
     --glass-rim-lo: hsl(0 0% 100% / 0.25);
     --glass-inset: hsl(0 0% 100% / 0.7);
-    --glass-shadow: 0 10px 40px -14px hsl(250 40% 30% / 0.35), 0 2px 6px -2px hsl(250 40% 30% / 0.15);
+    --glass-shadow: 0 10px 40px -14px hsl(220 40% 30% / 0.35), 0 2px 6px -2px hsl(220 40% 30% / 0.15);
     --glass-tint-mix: 90%;
   }
 }
@@ -53,7 +53,7 @@
   --glass-rim-hi: hsl(0 0% 100% / 0.95);
   --glass-rim-lo: hsl(0 0% 100% / 0.25);
   --glass-inset: hsl(0 0% 100% / 0.7);
-  --glass-shadow: 0 10px 40px -14px hsl(250 40% 30% / 0.35), 0 2px 6px -2px hsl(250 40% 30% / 0.15);
+  --glass-shadow: 0 10px 40px -14px hsl(220 40% 30% / 0.35), 0 2px 6px -2px hsl(220 40% 30% / 0.15);
   --glass-tint-mix: 90%;
 }
 
@@ -188,11 +188,11 @@
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) .glass-well {
-    background: hsl(240 30% 20% / 0.06);
+    background: hsl(220 30% 20% / 0.06);
   }
 }
 :root[data-theme='light'] .glass-well {
-  background: hsl(240 30% 20% / 0.06);
+  background: hsl(220 30% 20% / 0.06);
 }
 
 /* Accessibility: users who ask for less transparency get solid surfaces. */
