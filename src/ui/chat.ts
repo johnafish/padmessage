@@ -14,6 +14,7 @@ import { fromBase64, toBase64, type Side } from '../crypto/pad.ts';
 import { deleteChat, getChat, getPad, PadExhaustedError, reserve } from '../store.ts';
 import { avatar, formatBytes, h, icon, messagesLeft, sourceChip, toast } from './dom.ts';
 import { prepareImage, type ImageOption } from './images.ts';
+import { headerTime } from './time.ts';
 import { confirmSheet, exportPartnerCopy, renameSheet } from './sheets.ts';
 import { onMessage, onResync } from '../sync.ts';
 
@@ -415,13 +416,29 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
 
   // ----- rendering -----
 
-  const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+  /** A centred time header opens the chat, each new day, and any pause of an hour or more. */
+  const HEADER_GAP_MS = 60 * 60 * 1000;
+  const sameDay = (a: number, b: number) => new Date(a).toDateString() === new Date(b).toDateString();
   const timeFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 
   function imageUrl(item: Item, content: Extract<Content, { kind: 'image' }>): string {
     let url = imageUrls.get(item.key);
     if (!url) imageUrls.set(item.key, (url = URL.createObjectURL(new Blob([content.data as BlobPart], { type: content.mime }))));
     return url;
+  }
+
+  /** Header above `item`, keyed to it. Its text is refreshed each draw, so "Today" becomes "Yesterday" overnight. */
+  function timeHeader(item: Item): HTMLElement {
+    const key = `time:${item.key}`;
+    let el = nodes.get(key);
+    if (!el) nodes.set(key, (el = h('div', { class: 'time-header' })));
+    const { day, time, full } = headerTime(item.sentAt);
+    if (el.dataset.label !== `${day} ${time}`) {
+      el.dataset.label = `${day} ${time}`;
+      el.title = full;
+      el.replaceChildren(h('b', null, day), ` ${time}`);
+    }
+    return el;
   }
 
   /**
@@ -581,21 +598,15 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     const ordered = [...items.values()].sort((a, b) => a.seq - b.seq || a.sentAt - b.sentAt);
     const lastMine = ordered.findLast((it) => it.mine);
     const desired: HTMLElement[] = [];
-    let lastDay = '';
     ordered.forEach((item, i) => {
-      const day = dayFmt.format(item.sentAt);
-      if (day !== lastDay) {
-        lastDay = day;
-        const dayKey = `day:${day}`;
-        let sep = nodes.get(dayKey);
-        if (!sep) nodes.set(dayKey, (sep = h('div', { class: 'day' }, day)));
-        desired.push(sep);
-      }
       const prev = ordered[i - 1];
       const next = ordered[i + 1];
+      if (!prev || !sameDay(prev.sentAt, item.sentAt) || item.sentAt - prev.sentAt >= HEADER_GAP_MS) {
+        desired.push(timeHeader(item));
+      }
       const joins = (o?: Item) =>
         !!o && !!o.content && !!item.content && o.mine === item.mine &&
-        Math.abs(o.sentAt - item.sentAt) < 5 * 60_000 && dayFmt.format(o.sentAt) === day;
+        Math.abs(o.sentAt - item.sentAt) < 5 * 60_000 && sameDay(o.sentAt, item.sentAt);
       desired.push(rowFor(item, joins(prev), joins(next)));
       if (item === lastMine && (item.status === 'pending' || item.status === 'ok')) {
         status.textContent = item.status === 'pending' ? 'Sending…' : 'Delivered';

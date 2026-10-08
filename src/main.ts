@@ -5,7 +5,8 @@ import { getChat, listChats, markRead, onChatsChanged, type ChatRecord } from '.
 import { followChats, markSeen, onMessage, onResync } from './sync.ts';
 import { mountChat } from './ui/chat.ts';
 import { avatar, h, icon, installGlassPointer } from './ui/dom.ts';
-import { listTime, previewOf, type Preview } from './ui/previews.ts';
+import { previewOf, type Preview } from './ui/previews.ts';
+import { listTime } from './ui/time.ts';
 import { importPadSheet, newPadSheet } from './ui/sheets.ts';
 
 installGlassPointer();

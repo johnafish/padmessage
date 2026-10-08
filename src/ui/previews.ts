@@ -36,15 +36,3 @@ export async function previewOf(chat: ChatRecord, m: WireMessage): Promise<Previ
     return { ...base, text: 'Message' };
   }
 }
-
-/** iMessage-style list time: clock time today, then Yesterday, weekday, date. */
-export function listTime(ts: number): string {
-  const d = new Date(ts);
-  const now = new Date();
-  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
-  if (now.getTime() - ts < 6 * 24 * 60 * 60 * 1000) return d.toLocaleDateString(undefined, { weekday: 'long' });
-  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'numeric', year: '2-digit' });
-}
