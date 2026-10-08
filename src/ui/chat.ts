@@ -424,19 +424,36 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     return url;
   }
 
-  function bubbleFor(item: Item, contPrev: boolean, contNext: boolean): HTMLElement {
-    let el = nodes.get(item.key);
+  /**
+   * Each message is a full-width row: the bubble plus its time. The time is
+   * hidden until you hover the row (mouse) or drag the conversation sideways
+   * (touch); it stays in the DOM, so screen readers still announce it.
+   */
+  function rowFor(item: Item, contPrev: boolean, contNext: boolean): HTMLElement {
+    let row = nodes.get(item.key);
     const sig = `${item.status}|${item.seq}`;
-    if (!el || el.dataset.sig !== sig) {
-      const fresh = buildBubble(item);
-      if (el) el.replaceWith(fresh); // replacing in place keeps the list order stable
-      el = fresh;
-      el.dataset.sig = sig;
-      nodes.set(item.key, el);
+    if (!row || row.dataset.sig !== sig) {
+      const fresh = buildRow(item);
+      if (row) row.replaceWith(fresh); // replacing in place keeps the list order stable
+      row = fresh;
+      row.dataset.sig = sig;
+      nodes.set(item.key, row);
     }
-    el.classList.toggle('bubble--cont-prev', contPrev);
-    el.classList.toggle('bubble--cont-next', contNext);
-    return el;
+    row.classList.toggle('msg-row--cont-prev', contPrev);
+    const bubble = row.firstElementChild!;
+    bubble.classList.toggle('bubble--cont-prev', contPrev);
+    bubble.classList.toggle('bubble--cont-next', contNext);
+    return row;
+  }
+
+  function buildRow(item: Item): HTMLElement {
+    const kind = !item.content ? 'alert' : item.mine ? 'mine' : 'theirs';
+    return h(
+      'div',
+      { class: `msg-row msg-row--${kind}` },
+      buildBubble(item),
+      item.content && h('time', { class: 'msg-time', datetime: new Date(item.sentAt).toISOString() }, timeFmt.format(item.sentAt)),
+    );
   }
 
   function buildBubble(item: Item): HTMLElement {
@@ -450,7 +467,6 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       );
     }
     const content = item.content;
-    const meta = h('div', { class: 'bubble-meta' }, timeFmt.format(item.sentAt));
     const classes = [
       'bubble',
       item.mine ? 'bubble--mine glass glass--tinted' : 'bubble--theirs glass',
@@ -473,13 +489,17 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       );
       if (content.caption) body.push(h('div', { class: 'bubble-caption' }, content.caption));
     }
-    const el = h('div', { class: classes.filter(Boolean).join(' ') }, ...body, meta);
+    const el = h('div', { class: classes.filter(Boolean).join(' ') }, ...body);
     if (item.status === 'failed') {
-      meta.replaceChildren(
+      el.append(
         h(
-          'button',
-          { class: 'glass--interactive', style: 'text-decoration: underline; font-size: inherit', onclick: () => retry(item) },
-          'Not delivered. Tap to retry',
+          'div',
+          { class: 'bubble-meta' },
+          h(
+            'button',
+            { class: 'glass--interactive', style: 'text-decoration: underline; font-size: inherit', onclick: () => retry(item) },
+            'Not delivered. Tap to retry',
+          ),
         ),
       );
       el.title = 'The pad bytes for this attempt are burned and won’t be reused.';
@@ -516,6 +536,41 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     closeBtn.focus();
   }
 
+  // Touch: drag the conversation left to slide every message's time in from
+  // the right edge, as in iMessage; release springs it back. touch-action:
+  // pan-y on the list leaves vertical scrolling to the browser.
+  const REVEAL_PX = 72;
+  let swipe: { id: number; x: number; y: number; active: boolean } | null = null;
+  list.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch') swipe = { id: e.pointerId, x: e.clientX, y: e.clientY, active: false };
+  });
+  list.addEventListener('pointermove', (e) => {
+    if (!swipe || e.pointerId !== swipe.id) return;
+    const dx = e.clientX - swipe.x;
+    const dy = e.clientY - swipe.y;
+    if (!swipe.active) {
+      if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return void (swipe = null); // a scroll
+      if (dx > -10) return;
+      swipe.active = true;
+      list.classList.add('is-swiping');
+    }
+    list.style.setProperty('--reveal', String(Math.min(1, Math.max(0, -dx / REVEAL_PX))));
+  });
+  const endSwipe = () => {
+    if (!swipe) return;
+    if (swipe.active) {
+      // The lifted finger shouldn't also count as a tap on a photo.
+      const swallow = (e: Event) => (e.stopPropagation(), e.preventDefault());
+      list.addEventListener('click', swallow, { capture: true, once: true });
+      setTimeout(() => list.removeEventListener('click', swallow, { capture: true }), 50);
+    }
+    swipe = null;
+    list.classList.remove('is-swiping');
+    list.style.setProperty('--reveal', '0');
+  };
+  list.addEventListener('pointerup', endSwipe);
+  list.addEventListener('pointercancel', endSwipe);
+
   // Delivery status sits under your latest message only, as in most messengers.
   // "Delivered" means the relay has stored it: it answers a send only after the
   // write, and our own messages echo back over the stream only after it too.
@@ -541,7 +596,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
       const joins = (o?: Item) =>
         !!o && !!o.content && !!item.content && o.mine === item.mine &&
         Math.abs(o.sentAt - item.sentAt) < 5 * 60_000 && dayFmt.format(o.sentAt) === day;
-      desired.push(bubbleFor(item, joins(prev), joins(next)));
+      desired.push(rowFor(item, joins(prev), joins(next)));
       if (item === lastMine && (item.status === 'pending' || item.status === 'ok')) {
         status.textContent = item.status === 'pending' ? 'Sending…' : 'Delivered';
         status.dataset.status = item.status;

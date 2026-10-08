@@ -352,12 +352,18 @@ button {
   font-size: 13.5px;
 }
 .btn--icon {
+  /* Explicit size and 1:1 ratio: a min-height from .btn or .btn--sm must
+     never stretch an icon button into an oval. */
+  flex: none;
   width: 40px;
-  min-height: 40px;
+  height: 40px;
+  min-height: 0;
+  aspect-ratio: 1;
   padding: 0;
 }
 .btn--icon.btn--sm {
   width: 34px;
+  height: 34px;
 }
 .btn--block {
   width: 100%;
@@ -603,6 +609,8 @@ button {
 .messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden; /* times wait just past the right edge until revealed */
+  touch-action: pan-y; /* horizontal drags reveal times; vertical ones scroll */
   padding: calc(var(--head-space) + 12px) 18px calc(var(--composer-space) + 12px);
   display: flex;
   flex-direction: column;
@@ -654,7 +662,8 @@ button {
     padding-right: 10px;
   }
   .bubble {
-    max-width: 85%;
+    /* Leave room on the right for the revealed time column. */
+    max-width: min(85%, calc(100% - 64px));
   }
 }
 
@@ -672,18 +681,14 @@ button {
   --glass-radius: 22px;
   --glass-blur: 14px;
   max-width: min(72%, 560px);
-  padding: 9px 14px 8px;
+  padding: 8px 14px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   animation: bubble-in 0.5s var(--glass-spring) both;
   transform-origin: bottom left;
 }
 .bubble--mine {
-  align-self: flex-end;
   transform-origin: bottom right;
-}
-.bubble--theirs {
-  align-self: flex-start;
 }
 /* Tail-side corners tighten when consecutive bubbles stack. */
 .bubble--mine.bubble--cont-prev {
@@ -698,8 +703,71 @@ button {
 .bubble--theirs.bubble--cont-next {
   border-bottom-left-radius: 8px;
 }
-.bubble + .bubble:not(.bubble--cont-prev) {
+/* A message row: the bubble, plus its time (revealed on hover or swipe). */
+.msg-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.msg-row--mine {
+  justify-content: flex-end;
+}
+.msg-row--alert {
+  justify-content: center;
+}
+.msg-row + .msg-row:not(.msg-row--cont-prev) {
   margin-top: 8px;
+}
+.msg-time {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+/* Touch: times wait past the right edge; dragging the list left sets
+   --reveal (0 to 1), sliding them in and your own bubbles aside. Uses the
+   translate property so it never fights the bubbles' entrance animation. */
+.msg-time {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  translate: calc((1 - var(--reveal, 0)) * (100% + 16px)) -50%;
+  opacity: var(--reveal, 0);
+  transition:
+    translate 0.45s var(--glass-spring),
+    opacity 0.3s var(--glass-ease);
+}
+.msg-row--mine .bubble {
+  translate: calc(var(--reveal, 0) * -64px) 0;
+  transition: translate 0.45s var(--glass-spring);
+}
+.messages.is-swiping :is(.msg-time, .msg-row--mine .bubble) {
+  transition: none; /* follow the finger exactly */
+}
+/* Mouse or trackpad: the time fades in beside the bubble on hover. */
+@media (hover: hover) and (pointer: fine) {
+  .msg-time {
+    position: static;
+    translate: none;
+    margin: 0 10px;
+    padding: 2px 8px;
+    border-radius: 99px;
+    background: var(--subtle);
+    opacity: 0;
+    transition: opacity 0.15s var(--glass-ease);
+  }
+  .msg-row--mine .msg-time {
+    order: -1;
+  }
+  .msg-row:hover .msg-time {
+    opacity: 1;
+    transition-delay: 0.25s; /* don't flicker as the pointer passes over */
+  }
+  .msg-row--mine .bubble {
+    translate: none;
+  }
 }
 .bubble-meta {
   display: flex;
@@ -732,7 +800,6 @@ button {
   --glass-tint: var(--danger);
 }
 .bubble--alert {
-  align-self: center;
   max-width: 440px;
   font-size: 13px;
   color: var(--danger);
@@ -860,7 +927,8 @@ button {
 .send {
   flex: none;
   width: 38px;
-  min-height: 38px;
+  height: 38px;
+  aspect-ratio: 1;
   padding: 0;
 }
 .send svg {
@@ -1386,7 +1454,7 @@ button {
   background: var(--subtle);
 }
 .bubble--image .bubble-caption {
-  padding: 6px 10px 0;
+  padding: 6px 10px 4px;
 }
 .bubble--image .bubble-meta {
   padding: 2px 10px 3px;
