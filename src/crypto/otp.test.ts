@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { poly1305 } from '@noble/ciphers/_poly1305.js';
-import { costOf, costOfContent, frame, frameText, open, seal, unframe, unframeText, type Content } from './otp.ts';
+import { costOf, costOfContent, frame, frameText, messageRange, open, openSlice, seal, unframe, unframeText, type Content } from './otp.ts';
 import { checkRandomness, encodePadFile, entropyId, generatePad, halfSize, identifyPad, parsePadFile } from './pad.ts';
 
 const hex = (s: string) => Uint8Array.from(s.match(/../g)!.map((b) => parseInt(b, 16)));
@@ -50,6 +50,14 @@ describe('seal / open', () => {
     expect(() => seal(pad, chatId, 0, half - 32, frameText('x', 0))).toThrow(/outside/);
     expect(() => seal(pad, chatId, 1, half - 32, frameText('x', 0))).toThrow(/outside/);
     expect(() => seal(pad, chatId, 0, half - 64, frameText('x', 0))).not.toThrow();
+  });
+
+  it('opens from just the message\'s own pad bytes', () => {
+    const sealed = seal(pad, chatId, 1, 640, frameText('slice me', 7));
+    const [start, end] = messageRange(pad.length, 1, 640, sealed.ct.length);
+    expect(unframeText(openSlice(pad.slice(start, end), chatId, sealed)).text).toBe('slice me');
+    expect(() => openSlice(pad.slice(start, end - 1), chatId, sealed)).toThrow(/range/);
+    expect(() => openSlice(pad.slice(start + 1, end + 1), chatId, sealed)).toThrow(/authentication/);
   });
 
   it('uses disjoint pad bytes for each side at the same offset', () => {

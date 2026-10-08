@@ -118,7 +118,7 @@ describe('relay', () => {
   });
 
   it('streams history, then live messages, and resumes from Last-Event-ID', async () => {
-    const stream = await events(`/api/chats/${CHAT}/events?after=0`);
+    const stream = await events(`/api/events?chats=${CHAT}&after=0`);
     expect(stream.res.headers.get('content-type')).toContain('text/event-stream');
     const first = await stream.next();
     expect(first.id).toBe('1');
@@ -131,10 +131,43 @@ describe('relay', () => {
 
     // A reconnecting browser sends Last-Event-ID; only newer messages replay.
     await message();
-    const resumed = await events(`/api/chats/${CHAT}/events?after=0`, { 'last-event-id': live.id! });
+    const resumed = await events(`/api/events?chats=${CHAT}&after=0`, { 'last-event-id': live.id! });
     const replay = await resumed.next();
     expect(Number(replay.id)).toBe(posted.message.seq + 1);
     resumed.close();
+  });
+
+  it('streams several chats on one connection, sending photos as stubs', async () => {
+    const OTHER = 'OtherChatAAAAAAAAAAAAA';
+    const stream = await events(`/api/events?chats=${CHAT},${OTHER}&after=999999`);
+    const post = (chat: string, offset: number, bytes: number) =>
+      fetch(`${base}/api/chats/${chat}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-write-key': KEY, 'x-forwarded-for': '10.6.0.1' },
+        body: JSON.stringify({ side: 1, offset, ct: Buffer.alloc(bytes, 9).toString('base64'), tag: Buffer.alloc(16).toString('base64') }),
+      });
+    expect((await post(OTHER, 0, 40)).status).toBe(201);
+    expect((await post(CHAT, 0, 200 * 1024)).status).toBe(201); // a photo-sized message
+    const small = JSON.parse((await stream.next()).data!);
+    expect(small.chatId).toBe(OTHER);
+    expect(small.size).toBe(40);
+    expect(Buffer.from(small.ct, 'base64').length).toBe(40);
+    const photo = JSON.parse((await stream.next()).data!);
+    expect(photo.chatId).toBe(CHAT);
+    expect(photo.size).toBe(200 * 1024);
+    expect(photo.ct).toBeUndefined(); // body fetched over GET only when needed
+    stream.close();
+
+    // The newest message per chat, for the conversation list (stubbed the same way).
+    const latest = await (await fetch(`${base}/api/latest?chats=${CHAT},${OTHER},NoMessagesAAAAAAAAAAAA`)).json();
+    expect(latest.messages.map((m: { chatId: string }) => m.chatId).sort()).toEqual([CHAT, OTHER].sort());
+    expect(latest.messages.find((m: { chatId: string }) => m.chatId === CHAT).ct).toBeUndefined();
+    // GET history always carries full bodies.
+    const full = await (await fetch(`${base}/api/chats/${CHAT}/messages?after=${photo.seq - 1}`)).json();
+    expect(Buffer.from(full.messages[0].ct, 'base64').length).toBe(200 * 1024);
+
+    expect((await fetch(`${base}/api/events?chats=not-a-chat-id`)).status).toBe(400);
+    expect((await fetch(`${base}/api/latest`)).status).toBe(400);
   });
 
   it('rate-limits per client address behind a proxy', async () => {

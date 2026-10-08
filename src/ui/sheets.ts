@@ -567,7 +567,7 @@ export function importPadSheet(onDone: (chatId: string) => void, opts: ImportOpt
         // Only authenticated messages count, so junk posted to the chat can't burn the pad.
         let floor = 0;
         for (const m of existing) {
-          if (m.side !== side) continue;
+          if (m.side !== side || !m.ct) continue;
           const sealed = { side, offset: m.offset, ct: fromBase64(m.ct), tag: fromBase64(m.tag) };
           try {
             open(body, chatId, sealed);

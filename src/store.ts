@@ -24,14 +24,33 @@ export interface ChatRecord {
   partnerExported?: boolean;
   /** Where the pad's randomness came from. Missing on records made before this was tracked. */
   source?: PadSource;
+  /** Highest message seq the user has seen in this chat. Missing on records made before unread tracking. */
+  readSeq?: number;
 }
 
 const DB_NAME = 'padmessage';
+
+// Chat-list changes are announced to this tab and, through a
+// BroadcastChannel, to every other open tab, so the sidebar never needs a
+// reload to show a new, renamed, deleted or newly read chat.
+const changes = new EventTarget();
+const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('padmessage-chats') : null;
+channel?.addEventListener('message', () => changes.dispatchEvent(new Event('change')));
+
+function announceChange() {
+  changes.dispatchEvent(new Event('change'));
+  channel?.postMessage('change');
+}
+
+export function onChatsChanged(fn: () => void): () => void {
+  changes.addEventListener('change', fn);
+  return () => changes.removeEventListener('change', fn);
+}
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
   dbPromise ??= new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 2);
+    const req = indexedDB.open(DB_NAME, 3);
     req.onupgradeneeded = (e) => {
       const db = req.result;
       if (e.oldVersion < 1) {
@@ -40,6 +59,17 @@ function openDb(): Promise<IDBDatabase> {
       }
       // Ids of hardware randomness already mixed into a pad (see entropyId).
       if (e.oldVersion < 2) db.createObjectStore('entropy');
+      // Pads were stored as ArrayBuffers; now Blobs, so a single message's
+      // bytes can be read without loading the whole pad (see getPadRange).
+      if (e.oldVersion >= 1 && e.oldVersion < 3) {
+        const cursorReq = req.transaction!.objectStore('pads').openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) return;
+          if (cursor.value instanceof ArrayBuffer) cursor.update(new Blob([cursor.value]));
+          cursor.continue();
+        };
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -73,10 +103,23 @@ export async function getChat(chatId: string): Promise<ChatRecord | undefined> {
   return request(db.transaction('chats').objectStore('chats').get(chatId));
 }
 
-export async function getPad(chatId: string): Promise<Uint8Array | undefined> {
+async function padValue(chatId: string): Promise<Blob | ArrayBuffer | undefined> {
   const db = await openDb();
-  const buf: ArrayBuffer | undefined = await request(db.transaction('pads').objectStore('pads').get(chatId));
-  return buf && new Uint8Array(buf);
+  return request(db.transaction('pads').objectStore('pads').get(chatId));
+}
+
+export async function getPad(chatId: string): Promise<Uint8Array | undefined> {
+  const value = await padValue(chatId);
+  if (!value) return undefined;
+  return new Uint8Array(value instanceof Blob ? await value.arrayBuffer() : value);
+}
+
+/** Bytes [start, end) of a pad, read without loading the rest of it. */
+export async function getPadRange(chatId: string, start: number, end: number): Promise<Uint8Array | undefined> {
+  const value = await padValue(chatId);
+  if (!value) return undefined;
+  if (value instanceof Blob) return new Uint8Array(await value.slice(start, end).arrayBuffer());
+  return new Uint8Array(value, start, end - start);
 }
 
 export async function isEntropyUsed(id: string): Promise<boolean> {
@@ -90,10 +133,11 @@ export async function addChat(chat: ChatRecord, pad: Uint8Array, entropyId?: str
   const tx = db.transaction(['chats', 'pads', 'entropy'], 'readwrite');
   // add() rather than put(): importing the same pad twice must never reset its offset,
   // and a hardware dump already spent fails the whole transaction.
-  tx.objectStore('chats').add(chat);
-  tx.objectStore('pads').add(pad.slice().buffer, chat.chatId);
+  tx.objectStore('chats').add({ readSeq: 0, ...chat });
+  tx.objectStore('pads').add(new Blob([pad as BlobPart]), chat.chatId);
   if (entropyId) tx.objectStore('entropy').add(chat.chatId, entropyId);
   await done(tx);
+  announceChange();
 }
 
 export async function updateChat(chatId: string, patch: Partial<Pick<ChatRecord, 'name' | 'lastActivity' | 'partnerExported'>>) {
@@ -103,6 +147,20 @@ export async function updateChat(chatId: string, patch: Partial<Pick<ChatRecord,
   const chat: ChatRecord | undefined = await request(store.get(chatId));
   if (chat) store.put({ ...chat, ...patch });
   await done(tx);
+  announceChange();
+}
+
+/** Records that the user has seen messages up to `seq`. Only ever moves forward. */
+export async function markRead(chatId: string, seq: number): Promise<boolean> {
+  const db = await openDb();
+  const tx = db.transaction('chats', 'readwrite');
+  const store = tx.objectStore('chats');
+  const chat: ChatRecord | undefined = await request(store.get(chatId));
+  const changed = !!chat && seq > (chat.readSeq ?? -1);
+  if (changed) store.put({ ...chat, readSeq: seq });
+  await done(tx);
+  if (changed) announceChange();
+  return changed;
 }
 
 export async function deleteChat(chatId: string): Promise<void> {
@@ -111,6 +169,7 @@ export async function deleteChat(chatId: string): Promise<void> {
   tx.objectStore('chats').delete(chatId);
   tx.objectStore('pads').delete(chatId);
   await done(tx);
+  announceChange();
 }
 
 export class PadExhaustedError extends Error {

@@ -1,4 +1,4 @@
-import { fetchMessages, postMessage, subscribe, type WireMessage } from '../api.ts';
+import { fetchMessages, postMessage, type WireMessage } from '../api.ts';
 import {
   costOfCiphertext,
   costOfContent,
@@ -15,6 +15,7 @@ import { deleteChat, getChat, getPad, PadExhaustedError, reserve } from '../stor
 import { avatar, formatBytes, h, icon, messagesLeft, sourceChip, toast } from './dom.ts';
 import { prepareImage, type ImageOption } from './images.ts';
 import { confirmSheet, exportPartnerCopy, renameSheet } from './sheets.ts';
+import { onMessage, onResync } from '../sync.ts';
 
 interface Item {
   /** `${side}:${offset}`: unique, since a side never reuses an offset. */
@@ -37,6 +38,8 @@ export interface ChatCallbacks {
   onBack: () => void;
   onChanged: () => void;
   onDeleted: () => void;
+  /** The user has now seen messages up to this seq. */
+  onRead: (seq: number) => void;
 }
 
 export async function mountChat(container: HTMLElement, chatId: string, cb: ChatCallbacks): Promise<() => void> {
@@ -304,7 +307,9 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
 
   // ----- receiving -----
 
+  /** Takes a full message (with ciphertext); stubs are fetched first, see the stream listener. */
   async function ingest(wire: WireMessage) {
+    if (!wire.ct) return;
     lastSeq = Math.max(lastSeq, wire.seq);
     const side = wire.side as Side;
     const key = `${side}:${wire.offset}`;
@@ -565,7 +570,17 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     }
     if (forceScroll || nearBottom) list.scrollTop = list.scrollHeight;
     updateGauge();
+    reportRead();
   }
+
+  /** Everything rendered counts as read, but only while the user can actually see it. */
+  function reportRead() {
+    if (document.visibilityState !== 'visible') return;
+    let seen = 0;
+    for (const item of items.values()) if (Number.isFinite(item.seq)) seen = Math.max(seen, item.seq);
+    if (seen > 0) cb.onRead(seen);
+  }
+  document.addEventListener('visibilitychange', reportRead);
 
   // ----- menu & actions -----
 
@@ -645,35 +660,42 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
 
   // ----- start -----
 
-  draw();
-  try {
-    await backfill();
-  } catch {
-    toast('Couldn’t reach the relay. Retrying…');
-  }
-  draw(true);
-  textarea.focus();
-
   // Messages are ingested strictly in arrival order: ingest is async (it may
   // re-read the chat record), and history must not interleave with live events.
   let queue = Promise.resolve();
   const enqueue = (task: () => Promise<void>) => {
     queue = queue.then(task).catch((err) => console.warn('update failed', err));
   };
-  const unsubscribe = subscribe(
-    chatId,
-    lastSeq,
-    (m) =>
-      enqueue(async () => {
-        await ingest(m);
-        draw();
-        cb.onChanged();
-      }),
-    () => enqueue(backfill),
-  );
+  // Listen before loading history, so nothing arriving meanwhile is missed;
+  // the queue applies it after the history, and ingest ignores duplicates.
+  const stopMessages = onMessage((m) => {
+    if (m.chatId !== chatId) return;
+    enqueue(async () => {
+      // Photos arrive on the stream as stubs; fetch the full message.
+      if (m.ct) await ingest(m);
+      else await backfill();
+      draw();
+      cb.onChanged();
+    });
+  });
+  const stopResync = onResync(() => enqueue(backfill));
+
+  draw();
+  enqueue(async () => {
+    try {
+      await backfill();
+    } catch {
+      toast('Couldn’t reach the relay. Retrying…');
+    }
+    draw(true);
+  });
+  await queue;
+  textarea.focus();
 
   return () => {
-    unsubscribe();
+    stopMessages();
+    stopResync();
+    document.removeEventListener('visibilitychange', reportRead);
     spacing.disconnect();
     closeMenu();
     clearAttachment();

@@ -38,6 +38,14 @@ const PAGE_LIMIT = 500;
 const PAGE_BYTES = 8 * 1024 * 1024;
 const STREAM_PING_MS = 25_000;
 const MAX_STREAMS_PER_IP = 32;
+/** One stream covers every chat on a device, up to this many. */
+const MAX_STREAM_CHATS = 200;
+/**
+ * Streams and previews carry ciphertext only up to this size (any text
+ * message fits). Bigger messages, i.e. photos, go out as a stub with their
+ * size, and a client fetches the body over GET only if it needs it.
+ */
+const INLINE_CT_BYTES = 64 * 1024;
 const CHAT_ID = /^[A-Za-z0-9_-]{22}$/;
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -65,8 +73,15 @@ db.exec(`
 
 const sizesStmt = db.prepare('SELECT seq, length(ct) AS n FROM messages WHERE chat_id = ? AND seq > ? ORDER BY seq LIMIT ?');
 const rangeStmt = db.prepare(
-  'SELECT seq, side, pad_offset, ct, tag, received_at FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ? ORDER BY seq',
+  'SELECT seq, chat_id, side, pad_offset, ct, tag, received_at FROM messages WHERE chat_id = ? AND seq > ? AND seq <= ? ORDER BY seq',
 );
+// Stream replay and previews: ciphertext only for small messages.
+const SLIM_COLUMNS = `seq, chat_id, side, pad_offset, length(ct) AS size,
+  CASE WHEN length(ct) <= ${INLINE_CT_BYTES} THEN ct END AS ct, tag, received_at`;
+const replayStmt = db.prepare(
+  `SELECT ${SLIM_COLUMNS} FROM messages WHERE chat_id IN (SELECT value FROM json_each(?)) AND seq > ? ORDER BY seq LIMIT ?`,
+);
+const latestStmt = db.prepare(`SELECT ${SLIM_COLUMNS} FROM messages WHERE chat_id = ? ORDER BY seq DESC LIMIT 1`);
 const overlapStmt = db.prepare(
   'SELECT 1 FROM messages WHERE chat_id = ? AND side = ? AND pad_offset < ? AND pad_end > ? LIMIT 1',
 );
@@ -101,26 +116,51 @@ function checkWriteKey(chatId: string, key: unknown) {
   if (!timingSafeEqual(Buffer.from(row.write_hash), hash)) throw new HttpError(403, 'write key does not match this chat');
 }
 
+/**
+ * A message as sent to clients. `seq` is unique and increasing across the
+ * whole relay, so one number is enough to resume a stream covering many
+ * chats. `ct` is absent on stubs (see INLINE_CT_BYTES); `size` is always set.
+ */
 interface WireMessage {
   seq: number;
+  chatId: string;
   side: 0 | 1;
   offset: number;
-  ct: string;
+  size: number;
+  ct?: string;
   tag: string;
   receivedAt: number;
 }
 
-type Row = { seq: number; side: number; pad_offset: number; ct: Uint8Array; tag: Uint8Array; received_at: number };
+type Row = {
+  seq: number;
+  chat_id: string;
+  side: number;
+  pad_offset: number;
+  size?: number;
+  ct: Uint8Array | null;
+  tag: Uint8Array;
+  received_at: number;
+};
 
 function toWire(row: Row): WireMessage {
   return {
     seq: row.seq,
+    chatId: row.chat_id,
     side: row.side as 0 | 1,
     offset: row.pad_offset,
-    ct: Buffer.from(row.ct).toString('base64'),
+    size: row.size ?? row.ct!.length,
+    ...(row.ct ? { ct: Buffer.from(row.ct).toString('base64') } : {}),
     tag: Buffer.from(row.tag).toString('base64'),
     receivedAt: row.received_at,
   };
+}
+
+/** The stream/preview form of a message: large bodies dropped. */
+function slim(msg: WireMessage): WireMessage {
+  if (msg.size <= INLINE_CT_BYTES) return msg;
+  const { ct: _dropped, ...stub } = msg;
+  return stub;
 }
 
 /**
@@ -163,8 +203,10 @@ function postMessage(chatId: string, body: unknown): WireMessage {
   const { lastInsertRowid } = insertStmt.run(chatId, side, start, end, ctBytes, tagBytes, receivedAt);
   return {
     seq: Number(lastInsertRowid),
+    chatId,
     side,
     offset: start,
+    size: ctBytes.length,
     ct: ctBytes.toString('base64'),
     tag: tagBytes.toString('base64'),
     receivedAt,
@@ -215,18 +257,29 @@ setInterval(() => {
 }, 60_000).unref();
 
 // --- live updates: Server-Sent Events ---------------------------------------
-// One-way push is all a chat needs, and SSE is plain HTTP: no library, it
-// passes through any reverse proxy, and the browser reconnects on its own,
-// sending Last-Event-ID so the stream can replay whatever it missed.
+// One-way push is all the client needs, and SSE is plain HTTP: no library,
+// it passes through any reverse proxy, and the browser reconnects on its own,
+// sending Last-Event-ID so the stream can replay whatever it missed. A device
+// opens one stream for all its chats, so the conversation list can show new
+// messages and unread state without a connection per chat.
 
 const rooms = new Map<string, Set<ServerResponse>>();
 const streamsByIp = new Map<string, number>();
 
 function eventFrame(msg: WireMessage): string {
-  return `id: ${msg.seq}\ndata: ${JSON.stringify(msg)}\n\n`;
+  return `id: ${msg.seq}\ndata: ${JSON.stringify(slim(msg))}\n\n`;
 }
 
-function openStream(req: IncomingMessage, res: ServerResponse, chatId: string, url: URL) {
+/** Validated, de-duplicated chat ids from a comma-separated list. */
+function chatList(raw: string | null): string[] {
+  const ids = [...new Set((raw ?? '').split(',').filter(Boolean))];
+  if (ids.length === 0 || ids.length > MAX_STREAM_CHATS) throw new HttpError(400, `list 1 to ${MAX_STREAM_CHATS} chats`);
+  if (!ids.every((id) => CHAT_ID.test(id))) throw new HttpError(400, 'bad chat id');
+  return ids;
+}
+
+function openStream(req: IncomingMessage, res: ServerResponse, url: URL) {
+  const chats = chatList(url.searchParams.get('chats'));
   const ip = clientIp(req);
   const open = streamsByIp.get(ip) ?? 0;
   if (open >= MAX_STREAMS_PER_IP) throw new HttpError(429, 'too many open streams');
@@ -237,24 +290,29 @@ function openStream(req: IncomingMessage, res: ServerResponse, chatId: string, u
     'Cache-Control': 'no-store',
     'X-Accel-Buffering': 'no', // tell nginx not to buffer the stream
   });
-  // Replay and join the room in one synchronous block: node:sqlite is
+  // Replay and join the rooms in one synchronous block: node:sqlite is
   // synchronous, so no message can be stored between the query and the join.
-  const { rows, more } = page(chatId, after);
+  const rows = replayStmt.all(JSON.stringify(chats), after, PAGE_LIMIT) as Row[];
   let frames = 'retry: 3000\n\n' + rows.map((r) => eventFrame(toWire(r))).join('');
   // Too far behind to replay in one go: the client pages the rest over GET.
-  if (more) frames += 'event: resync\ndata: {}\n\n';
+  if (rows.length === PAGE_LIMIT) frames += 'event: resync\ndata: {}\n\n';
   res.write(frames);
 
-  const room = rooms.get(chatId) ?? new Set();
-  rooms.set(chatId, room);
-  room.add(res);
+  for (const chatId of chats) {
+    const room = rooms.get(chatId) ?? new Set();
+    rooms.set(chatId, room);
+    room.add(res);
+  }
   streamsByIp.set(ip, open + 1);
   // Comment lines keep idle proxies and load balancers from closing the stream.
   const ping = setInterval(() => res.write(': ping\n\n'), STREAM_PING_MS);
   res.on('close', () => {
     clearInterval(ping);
-    room.delete(res);
-    if (room.size === 0) rooms.delete(chatId);
+    for (const chatId of chats) {
+      const room = rooms.get(chatId);
+      room?.delete(res);
+      if (room?.size === 0) rooms.delete(chatId);
+    }
     const left = (streamsByIp.get(ip) ?? 1) - 1;
     if (left > 0) streamsByIp.set(ip, left);
     else streamsByIp.delete(ip);
@@ -363,10 +421,14 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
       checkWriteKey(chatMatch[1], body?.writeKey);
       return sendJson(res, 200, { ok: true });
     }
-    const streamMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/events$/);
-    if (streamMatch && req.method === 'GET') {
-      if (!CHAT_ID.test(streamMatch[1])) throw new HttpError(400, 'bad chat id');
-      return openStream(req, res, streamMatch[1], url);
+    if (url.pathname === '/api/events' && req.method === 'GET') return openStream(req, res, url);
+    if (url.pathname === '/api/latest' && req.method === 'GET') {
+      // Each listed chat's newest message, for the conversation list.
+      const latest = chatList(url.searchParams.get('chats'))
+        .map((id) => latestStmt.get(id) as Row | undefined)
+        .filter((row): row is Row => !!row)
+        .map((row) => toWire(row));
+      return sendJson(res, 200, { messages: latest });
     }
     const match = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages$/);
     if (match) {

@@ -1,9 +1,11 @@
 import './styles/app.css';
-import { fetchMessages } from './api.ts';
+import { fetchLatest, fetchMessages } from './api.ts';
 import { isChatId } from './crypto/pad.ts';
-import { getChat, listChats, type ChatRecord } from './store.ts';
+import { getChat, listChats, markRead, onChatsChanged, type ChatRecord } from './store.ts';
+import { followChats, markSeen, onMessage, onResync } from './sync.ts';
 import { mountChat } from './ui/chat.ts';
 import { avatar, h, icon, installGlassPointer } from './ui/dom.ts';
+import { listTime, previewOf, type Preview } from './ui/previews.ts';
 import { importPadSheet, newPadSheet } from './ui/sheets.ts';
 
 installGlassPointer();
@@ -92,6 +94,7 @@ async function route() {
       onBack: () => go(null),
       onChanged: () => void renderList(),
       onDeleted: () => go(null),
+      onRead: (seq) => void markRead(chatId, seq), // the store announces the change
     });
   } else {
     renderLocked(chatId);
@@ -100,29 +103,96 @@ async function route() {
 
 // ---------- sidebar ----------
 
+/** Newest message per chat, decrypted on the fly and never stored. */
+const previews = new Map<string, Preview>();
+
+let renderGeneration = 0;
+
 async function renderList() {
+  // Calls overlap (previews wait on the network), so only the newest one
+  // draws, and it re-reads the list after waiting, so it is never stale.
+  const generation = ++renderGeneration;
+  await loadPreviews(await listChats());
   const chats = await listChats();
+  if (generation !== renderGeneration) return;
+  // One live stream covers every chat here; this reconnects only when the set changes.
+  followChats(chats.map((c) => c.chatId));
+  const activity = (c: ChatRecord) => Math.max(previews.get(c.chatId)?.at ?? 0, c.createdAt);
+  chats.sort((a, b) => activity(b) - activity(a));
   list.replaceChildren(...chats.map(row));
   // Runs on every route change and rename, so the tab title stays current.
   const current = chats.find((c) => c.chatId === currentChat);
   document.title = current ? `${current.name} · PadMessage` : currentChat ? 'Locked chat · PadMessage' : 'PadMessage';
 }
 
+/** Fetches and decrypts the newest message of any chat that has no preview yet. */
+async function loadPreviews(chats: ChatRecord[]) {
+  const missing = chats.filter((c) => !previews.has(c.chatId));
+  for (let i = 0; i < missing.length; i += 200) {
+    const batch = missing.slice(i, i + 200);
+    let latest;
+    try {
+      latest = await fetchLatest(batch.map((c) => c.chatId));
+    } catch {
+      return; // offline: previews appear once the relay is reachable
+    }
+    for (const m of latest) {
+      const chat = batch.find((c) => c.chatId === m.chatId)!;
+      setPreview(m.chatId, await previewOf(chat, m));
+      markSeen(m.seq);
+      // Chats from before unread tracking start out fully read.
+      if (chat.readSeq === undefined) await markRead(chat.chatId, m.seq);
+    }
+  }
+}
+
+function setPreview(chatId: string, p: Preview) {
+  if ((previews.get(chatId)?.seq ?? -1) < p.seq) previews.set(chatId, p);
+}
+
+// New, renamed, deleted or newly read chats, from this tab or another.
+onChatsChanged(() => void renderList());
+
+onMessage(async (m) => {
+  const chat = await getChat(m.chatId);
+  if (!chat) return;
+  setPreview(m.chatId, await previewOf(chat, m));
+  void renderList();
+});
+onResync(() => {
+  previews.clear();
+  void renderList();
+});
+
+function isUnread(chat: ChatRecord, p: Preview | undefined): boolean {
+  if (!p || p.mine || p.seq <= (chat.readSeq ?? 0)) return false;
+  // The open chat marks itself read as messages render; don't flash a dot meanwhile.
+  return !(chat.chatId === currentChat && document.visibilityState === 'visible');
+}
+
 function row(chat: ChatRecord) {
   const active = chat.chatId === currentChat;
+  const p = previews.get(chat.chatId);
+  const unread = isUnread(chat, p);
   return h(
     'button',
     {
-      class: `chat-row${active ? ' glass glass--clear' : ''}`,
+      class: `chat-row${active ? ' glass glass--clear' : ''}${unread ? ' chat-row--unread' : ''}`,
       'aria-current': String(active),
       onclick: () => go(chat.chatId),
     },
+    h('span', { class: 'unread-dot', 'aria-hidden': 'true' }),
     avatar(chat.name, chat.chatId),
     h(
       'div',
       { class: 'chat-row-main' },
-      h('div', { class: 'chat-row-name' }, chat.name),
-      h('div', { class: 'chat-row-sub' }, chat.fingerprint),
+      h(
+        'div',
+        { class: 'chat-row-top' },
+        h('span', { class: 'chat-row-name' }, chat.name),
+        p && h('time', { class: 'chat-row-time', datetime: new Date(p.at).toISOString() }, listTime(p.at)),
+      ),
+      h('div', { class: 'chat-row-sub' }, unread && h('span', { class: 'sr-only' }, 'Unread: '), p ? p.text : 'No messages yet'),
     ),
   );
 }

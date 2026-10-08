@@ -131,9 +131,9 @@ export function unframeText(framed: Uint8Array): { text: string; sentAt: number 
   return { text: content.text, sentAt };
 }
 
-/** Absolute pad range for a message, or an error if it escapes the side's half. */
-function padRange(pad: Uint8Array, side: Side, offset: number, ctLength: number): [number, number] {
-  const half = halfSize(pad.length);
+/** Absolute pad range [start, end) a message uses, or an error if it escapes the sender's half. */
+export function messageRange(padLength: number, side: Side, offset: number, ctLength: number): [number, number] {
+  const half = halfSize(padLength);
   const cost = costOfCiphertext(ctLength);
   if (!Number.isSafeInteger(offset) || offset < 0 || offset + cost > half) {
     throw new Error('Message falls outside the pad.');
@@ -160,7 +160,7 @@ function authData(chatId: string, side: Side, offset: number, ct: Uint8Array): U
 }
 
 export function seal(pad: Uint8Array, chatId: string, side: Side, offset: number, framed: Uint8Array): Sealed {
-  const [start] = padRange(pad, side, offset, framed.length);
+  const [start] = messageRange(pad.length, side, offset, framed.length);
   const macKey = pad.subarray(start, start + MAC_KEY_BYTES);
   const stream = pad.subarray(start + MAC_KEY_BYTES, start + MAC_KEY_BYTES + framed.length);
   const ct = new Uint8Array(framed.length);
@@ -171,13 +171,22 @@ export function seal(pad: Uint8Array, chatId: string, side: Side, offset: number
 
 /** Verifies then decrypts. Throws if the message was forged or altered. */
 export function open(pad: Uint8Array, chatId: string, msg: Sealed): Uint8Array {
-  const [start] = padRange(pad, msg.side, msg.offset, msg.ct.length);
-  const macKey = pad.subarray(start, start + MAC_KEY_BYTES);
+  const [start, end] = messageRange(pad.length, msg.side, msg.offset, msg.ct.length);
+  return openSlice(pad.subarray(start, end), chatId, msg);
+}
+
+/**
+ * `open` given only the message's own pad bytes (the range from
+ * `messageRange`), so a caller can read just those bytes from storage.
+ */
+export function openSlice(padBytes: Uint8Array, chatId: string, msg: Sealed): Uint8Array {
+  if (padBytes.length !== costOfCiphertext(msg.ct.length)) throw new Error('Wrong pad range for this message.');
+  const macKey = padBytes.subarray(0, MAC_KEY_BYTES);
   const expected = poly1305(authData(chatId, msg.side, msg.offset, msg.ct), macKey);
   if (msg.tag.length !== TAG_BYTES || !equalBytes(expected, msg.tag)) {
     throw new Error('Message failed authentication.');
   }
-  const stream = pad.subarray(start + MAC_KEY_BYTES, start + MAC_KEY_BYTES + msg.ct.length);
+  const stream = padBytes.subarray(MAC_KEY_BYTES);
   const out = new Uint8Array(msg.ct.length);
   for (let i = 0; i < out.length; i++) out[i] = msg.ct[i] ^ stream[i];
   return out;
