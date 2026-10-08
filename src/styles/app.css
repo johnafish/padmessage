@@ -15,6 +15,7 @@
   --ok: hsl(150 70% 50%);
   --sun: hsl(36 100% 62%);
   --moon: hsl(210 100% 72%);
+  --cam: hsl(178 65% 58%);
   --pool-1: hsl(258 45% 26% / 0.6);
   --pool-2: hsl(192 50% 18% / 0.55);
   --pane: hsl(0 0% 100% / 0.025);
@@ -37,6 +38,10 @@
     --hairline: hsl(248 30% 20% / 0.08);
     --sun: hsl(30 95% 48%);
     --moon: hsl(212 90% 50%);
+    --cam: hsl(184 85% 28%);
+    --ok: hsl(150 75% 30%);
+    --warn: hsl(32 95% 38%);
+    --danger: hsl(352 75% 46%);
   }
 }
 :root[data-theme='light'] {
@@ -52,6 +57,10 @@
   --hairline: hsl(248 30% 20% / 0.08);
   --sun: hsl(30 95% 48%);
   --moon: hsl(212 90% 50%);
+  --cam: hsl(184 85% 28%);
+  --ok: hsl(150 75% 30%);
+  --warn: hsl(32 95% 38%);
+  --danger: hsl(352 75% 46%);
 }
 
 *,
@@ -1115,6 +1124,9 @@ button {
 .source-chip[data-source='mixed'] {
   --chip: var(--ok);
 }
+.source-chip[data-source='webcam'] {
+  --chip: var(--cam);
+}
 .source-chip[data-source='external'],
 .source-chip[data-source='unknown'] {
   --chip: var(--warn);
@@ -1129,4 +1141,55 @@ button {
   border-radius: 6px;
   background: hsl(0 0% 50% / 0.18);
   overflow-wrap: anywhere;
+}
+
+/* Randomness options: one per row, chip on the left, description on the right. */
+.choices--source {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+.choices--source .choice {
+  flex-direction: row;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 14px;
+  text-align: right;
+}
+.choices--source .choice .source-chip {
+  margin-bottom: 0;
+}
+
+/* Camera collection */
+.cam-frame {
+  margin-bottom: 12px;
+  border-radius: 18px;
+  overflow: hidden;
+  background: hsl(0 0% 0% / 0.35);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.cam-preview {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  transform: scaleX(-1); /* mirror, like every camera preview */
+}
+.cam-stats {
+  font-size: 12.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.cam-quality {
+  margin-top: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.cam-quality[data-quality='good'] {
+  color: var(--ok);
+}
+.cam-quality[data-quality='low'] {
+  color: var(--warn);
+}
+.cam-quality[data-quality='none'] {
+  color: var(--danger);
 }

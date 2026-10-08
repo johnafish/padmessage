@@ -9,7 +9,8 @@
 // import), or a 16-byte header followed by the pad body:
 //   0..7   magic "PADMSG1\0"
 //   8      side this copy is meant for (0 | 1)
-//   9      randomness source: 1 browser CSPRNG, 2 hardware TRNG XOR CSPRNG
+//   9      randomness source: 1 browser CSPRNG, 2 hardware TRNG XOR CSPRNG,
+//          3 camera noise XOR CSPRNG
 //   10..15 reserved, zero
 // The header is never part of the key material or the pad identity.
 
@@ -27,11 +28,14 @@ const HEADER_LEN = 16;
  *   csprng   - browser crypto.getRandomValues
  *   mixed    - hardware TRNG output XORed with the browser CSPRNG: at least
  *              as random as the better of the two
+ *   webcam   - conditioned camera sensor noise XORed with the browser CSPRNG.
+ *              Never weaker than csprng, but not claimed as true random: we
+ *              can't verify how much real noise a given camera delivers
  *   external - a raw file from an unknown source; we can't vouch for it
  */
-export type PadSource = 'csprng' | 'mixed' | 'external';
+export type PadSource = 'csprng' | 'mixed' | 'webcam' | 'external';
 
-const SOURCE_BYTES: Record<PadSource, number> = { external: 0, csprng: 1, mixed: 2 };
+const SOURCE_BYTES: Record<PadSource, number> = { external: 0, csprng: 1, mixed: 2, webcam: 3 };
 
 export const MIN_PAD_BYTES = 64 * 1024;
 export const MAX_PAD_BYTES = 512 * 1024 * 1024;
@@ -47,7 +51,8 @@ export function parsePadFile(bytes: Uint8Array): ParsedPad {
   if (!hasHeader) return { body: bytes, side: null, source: 'external' };
   const side = bytes[8];
   if (side !== 0 && side !== 1) throw new Error('Pad file header names an unknown side.');
-  const source = bytes[9] === SOURCE_BYTES.mixed ? 'mixed' : bytes[9] === SOURCE_BYTES.csprng ? 'csprng' : 'external';
+  const source =
+    (Object.keys(SOURCE_BYTES) as PadSource[]).find((k) => SOURCE_BYTES[k] === bytes[9]) ?? 'external';
   return { body: bytes.subarray(HEADER_LEN), side, source };
 }
 

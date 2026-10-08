@@ -16,6 +16,7 @@ import {
 } from '../crypto/pad.ts';
 import { addChat, getChat, isEntropyUsed, updateChat, type ChatRecord } from '../store.ts';
 import { download, formatBytes, h, icon, messagesLeft, sideIcon, SOURCE_INFO, sourceChip, toast } from './dom.ts';
+import { cameraSupported, collectCameraNoise, startCamera, stopCamera } from './webcam.ts';
 
 // ---------- sheet scaffolding ----------
 
@@ -85,11 +86,22 @@ const SIZES = [
   { bytes: 64 * 1024 * 1024, label: '64 MB' },
 ];
 
+type GenSource = 'csprng' | 'webcam' | 'mixed';
+
+const SOURCE_OPTIONS: { source: GenSource; label: string }[] = [
+  { source: 'csprng', label: 'Browser only' },
+  { source: 'webcam', label: 'Webcam + browser' },
+  { source: 'mixed', label: 'Hardware + browser' },
+];
+
 export function newPadSheet(onDone: (chatId: string) => void) {
-  const sheet = openSheet('Create a pad');
+  let collecting: AbortController | null = null;
+  // Closing the sheet mid-collection must turn the camera off.
+  const sheet = openSheet('Create a pad', () => collecting?.abort());
   let size = SIZES[0].bytes;
-  let useHardware = false;
+  let source: GenSource = 'csprng';
   let hardware: { bytes: Uint8Array; id: string; name: string } | null = null;
+  const camOk = cameraSupported();
   const name = nameField();
 
   const sizeButtons = SIZES.map((s) =>
@@ -108,19 +120,20 @@ export function newPadSheet(onDone: (chatId: string) => void) {
     ),
   );
 
-  const sourceButtons = (['csprng', 'mixed'] as const).map((src) =>
+  const sourceButtons = SOURCE_OPTIONS.map((opt) =>
     h(
       'button',
       {
         class: 'choice glass glass--clear glass--interactive',
-        'aria-pressed': String(src === 'csprng'),
+        'aria-pressed': String(opt.source === source),
+        title: opt.source === 'webcam' && !camOk ? 'Camera access needs HTTPS (or localhost).' : undefined,
         onclick: () => {
-          useHardware = src === 'mixed';
+          source = opt.source;
           sync();
         },
       },
-      sourceChip(src),
-      h('span', null, src === 'mixed' ? 'Hardware + browser' : 'Browser only'),
+      sourceChip(opt.source),
+      h('span', null, opt.label),
     ),
   );
 
@@ -160,6 +173,27 @@ export function newPadSheet(onDone: (chatId: string) => void) {
     ),
   );
 
+  // Camera noise: conditioned sensor noise, mixed in by XOR.
+  const video = h('video', { class: 'cam-preview', muted: true, playsInline: true, autoplay: true, 'aria-label': 'Camera preview' });
+  const camFrame = h('div', { class: 'cam-frame', hidden: true }, video);
+  const camBar = h('i');
+  const camStats = h('div', { class: 'cam-stats' });
+  const camQuality = h('div', { class: 'cam-quality' });
+  const camStatus = h('div', { 'aria-live': 'polite' });
+  const camSection = h(
+    'div',
+    { class: 'field', hidden: true },
+    camFrame,
+    camStatus,
+    camOk
+      ? callout(
+          'info',
+          'Point the camera at something with texture, in ordinary light. A covered lens, a blank wall or a bright window gives little noise. ',
+          'Frames are processed on this device and never stored or sent.',
+        )
+      : callout('warn', 'Camera access needs a secure connection (HTTPS or localhost).'),
+  );
+
   const sourceNote = h('div');
   const generate = h(
     'button',
@@ -167,21 +201,31 @@ export function newPadSheet(onDone: (chatId: string) => void) {
     icon('pad'),
     'Generate pad',
   );
+  const setLabel = (text: string) => (generate.lastChild!.textContent = text);
 
   function sync() {
-    sourceButtons.forEach((b, i) => b.setAttribute('aria-pressed', String((i === 1) === useHardware)));
-    hwSection.hidden = !useHardware;
-    const limit = useHardware && hardware ? hardware.bytes.length : Infinity;
+    if (collecting) return; // inputs stay locked until collection ends
+    name.input.disabled = false;
+    sourceButtons.forEach((b, i) => {
+      b.setAttribute('aria-pressed', String(SOURCE_OPTIONS[i].source === source));
+      b.disabled = false;
+    });
+    hwSection.hidden = source !== 'mixed';
+    camSection.hidden = source !== 'webcam';
+    const limit = source === 'mixed' && hardware ? hardware.bytes.length : Infinity;
     if (size > limit) size = [...SIZES].reverse().find((s) => s.bytes <= limit)?.bytes ?? size;
     sizeButtons.forEach((b, i) => {
       b.setAttribute('aria-pressed', String(SIZES[i].bytes === size));
       b.disabled = SIZES[i].bytes > limit;
     });
-    generate.disabled = useHardware && (!hardware || size > hardware.bytes.length);
+    generate.disabled = (source === 'mixed' && (!hardware || size > hardware.bytes.length)) || (source === 'webcam' && !camOk);
+    setLabel(source === 'webcam' ? 'Start camera and generate' : 'Generate pad');
     sourceNote.replaceChildren(
-      useHardware
+      source === 'mixed'
         ? callout('info', h('b', null, 'True random. '), SOURCE_INFO.mixed.detail)
-        : callout('warn', h('b', null, 'Strong, but not provably unbreakable. '), SOURCE_INFO.csprng.detail),
+        : source === 'webcam'
+          ? callout('info', h('b', null, 'Camera noise. '), SOURCE_INFO.webcam.detail)
+          : callout('warn', h('b', null, 'Strong, but not provably unbreakable. '), SOURCE_INFO.csprng.detail),
     );
   }
 
@@ -218,33 +262,90 @@ export function newPadSheet(onDone: (chatId: string) => void) {
     sync();
   }
 
+  /** Runs the camera until `size` bytes of noise are collected. Null if cancelled or failed. */
+  async function collectFromCamera(): Promise<Uint8Array | null> {
+    const ctrl = (collecting = new AbortController());
+    name.input.disabled = true;
+    [...sourceButtons, ...sizeButtons].forEach((b) => (b.disabled = true));
+    generate.disabled = false;
+    setLabel('Stop');
+    camFrame.hidden = false;
+    camFrame.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    camBar.style.setProperty('--p', '0%');
+    camStats.textContent = 'Waiting for camera permission…';
+    camQuality.textContent = '';
+    camStatus.replaceChildren(h('div', { class: 'progress' }, camBar), camStats, camQuality);
+    let stream: MediaStream | null = null;
+    try {
+      stream = await startCamera(video);
+      return await collectCameraNoise(
+        video,
+        size,
+        (p) => {
+          camBar.style.setProperty('--p', `${(p.collected / p.target) * 100}%`);
+          const left = p.bytesPerSecond > 0 && p.collected > 0 ? Math.ceil((p.target - p.collected) / p.bytesPerSecond) : null;
+          camStats.textContent =
+            `${formatBytes(p.collected)} of ${formatBytes(p.target)} · ${formatBytes(Math.round(p.bytesPerSecond))}/s` +
+            (left !== null ? ` · about ${left < 60 ? `${left}s` : `${Math.ceil(left / 60)} min`} left` : '');
+          camQuality.dataset.quality = p.quality;
+          camQuality.textContent =
+            p.quality === 'good'
+              ? 'Plenty of noise'
+              : p.quality === 'low'
+                ? 'Low noise: try more light or a more textured scene'
+                : 'No usable noise: is the lens covered or the image frozen?';
+        },
+        ctrl.signal,
+      );
+    } catch (err) {
+      const cancelled = err instanceof DOMException && err.name === 'AbortError';
+      camStatus.replaceChildren(cancelled ? '' : callout('danger', cameraError(err)));
+      return null;
+    } finally {
+      stopCamera(video, stream);
+      camFrame.hidden = true;
+      collecting = null;
+      sync();
+    }
+  }
+
   render(
     sheet,
     h('h2', null, 'Create a pad'),
     h('p', { class: 'lede' }, 'You keep one copy of the pad and hand the other to your partner in person.'),
     name.el,
-    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Randomness'), h('div', { class: 'choices choices--2' }, ...sourceButtons)),
-    hwSection,
+    h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Randomness'), h('div', { class: 'choices choices--source' }, ...sourceButtons), sourceNote),
     h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Pad size'), h('div', { class: 'choices' }, ...sizeButtons)),
-    sourceNote,
+    // The source-specific step sits right above Generate, so camera progress and Stop stay together.
+    hwSection,
+    camSection,
     h('div', { class: 'sheet-foot' }, generate),
   );
   sync();
   name.input.focus();
 
   async function run() {
-    const source: PadSource = useHardware ? 'mixed' : 'csprng';
-    if (useHardware && !hardware) return;
+    if (collecting) {
+      collecting.abort();
+      return;
+    }
+    if (source === 'mixed' && !hardware) return;
+    let mixIn: Uint8Array | undefined = source === 'mixed' ? hardware!.bytes : undefined;
+    if (source === 'webcam') {
+      const noise = await collectFromCamera();
+      if (!noise) return;
+      mixIn = noise;
+    }
     generate.disabled = true;
-    generate.lastChild!.textContent = 'Generating…';
+    setLabel('Generating…');
     await new Promise((r) => setTimeout(r, 30)); // let the label paint before the CPU-bound work
-    const body = generatePad(size, useHardware ? hardware!.bytes : undefined);
+    const body = generatePad(size, mixIn);
+    if (source === 'webcam') mixIn!.fill(0);
     const { chatId, fingerprint, writeKey } = await identifyPad(body);
     try {
       await claimChat(chatId, writeKey);
     } catch (err) {
-      generate.disabled = false;
-      generate.lastChild!.textContent = 'Generate pad';
+      sync();
       toast(`Couldn’t reach the relay: ${err instanceof Error ? err.message : err}`);
       return;
     }
@@ -265,13 +366,21 @@ export function newPadSheet(onDone: (chatId: string) => void) {
       partnerExported: false,
       source,
     };
-    await addChat(chat, body, useHardware ? hardware!.id : undefined);
+    await addChat(chat, body, source === 'mixed' ? hardware!.id : undefined);
     hardware = null; // drop our reference to the raw TRNG bytes
     showHandoff(sheet, chat, body, () => {
       sheet.close();
       onDone(chatId);
     });
   }
+}
+
+function cameraError(err: unknown): string {
+  const name = err instanceof DOMException ? err.name : '';
+  if (name === 'NotAllowedError') return 'Camera access was blocked. Allow it in your browser’s site settings, or pick another source.';
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'No camera was found.';
+  if (name === 'NotReadableError') return 'The camera is in use by another app.';
+  return `Couldn’t start the camera: ${err instanceof Error ? err.message : err}`;
 }
 
 function wireDrop(zone: HTMLElement, onFile: (f: File) => void) {
