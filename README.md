@@ -87,6 +87,17 @@ location / {
 }
 ```
 
+### Option C: Railway
+
+`railway.json` configures the build (this Dockerfile), the `/healthz` health check and a single replica. A single replica is required: the database is one SQLite file and live streams are held in memory.
+
+1. Create a service from this repo and attach a **volume mounted at `/data`**. Without one, messages are lost on every deploy.
+2. Set the variables `CLIENT_IP_HEADER=x-real-ip` and `RAILWAY_RUN_UID=0`. The second lets the image's non-root user write to the volume.
+3. Add your domain (`railway domain chat.example.com`) and create the `CNAME` and `TXT` records it prints at your DNS provider. A subdomain needs no nameserver change.
+4. Open `https://chat.example.com/api/client-ip`. It should show your own public address. If it shows a `100.64.x.x` address, Railway's header isn't the client's: try `CLIENT_IP_HEADER=x-forwarded-for`.
+
+Railway's edge caps request duration, so the server ends each live stream every 4 minutes (`STREAM_MAX_SECONDS`). Browsers reconnect within a second and replay anything they missed.
+
 ### Configuration
 
 | Variable | Default | Purpose |
@@ -96,12 +107,15 @@ location / {
 | `DATA_DIR` | `./data` | Where the SQLite database lives. |
 | `DIST_DIR` | `./dist` | The built app. |
 | `TLS_CERT`, `TLS_KEY` | unset | Certificate and key paths. Set both to serve HTTPS and HTTP/2 directly. |
-| `TRUST_PROXY` | off | `1` behind one reverse proxy: rate limits use the client address the proxy forwards (the last `X-Forwarded-For` entry), and HSTS is sent when the proxy reports HTTPS. |
+| `TRUST_PROXY` | off | `1` behind one reverse proxy that appends to `X-Forwarded-For` (nginx, Caddy): rate limits use its last entry, and HSTS is sent when the proxy reports HTTPS. |
+| `CLIENT_IP_HEADER` | unset | Behind a platform edge that overwrites a client-address header (Railway: `x-real-ip`): rate limits use that header's first value. Check it at `/api/client-ip`. |
+| `STREAM_MAX_SECONDS` | `240` | How long a live stream stays open before the server ends it and the browser resumes. Keeps streams under proxies' request-duration caps. `0` disables. |
 | `NODE_ENV` | unset | `production` serves the app. Otherwise the server is API-only and Vite serves the app in development. |
 
 ### Operations
 
-- **Health check:** `GET /healthz` returns `ok`. The Docker image uses it.
+- **Health check:** `GET /healthz` returns `ok`. The Docker image and `railway.json` use it.
+- **Proxy check:** `GET /api/client-ip` shows the address the server attributes your requests to, which rate limiting uses.
 - **Backups:** copy `DATA_DIR`. To copy safely while running, use `sqlite3 padmessage.sqlite ".backup backup.sqlite"`.
 - **What the server stores:** ciphertext with its size and arrival time, chat IDs, and write-key hashes. Chat IDs and write keys are derived from the pad by hashing, so neither reveals it. The server never sees pads or plaintext, and there are no accounts. Client addresses are only held in memory, for rate limiting.
 - **Shutdown:** `SIGTERM` closes open streams and the database cleanly. Browsers reconnect when the server is back.

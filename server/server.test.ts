@@ -207,6 +207,11 @@ describe('relay', () => {
     expect(next.more).toBe(false);
   });
 
+  it('reports the client address it rate-limits by (last X-Forwarded-For entry with TRUST_PROXY)', async () => {
+    const r = await (await fetch(`${base}/api/client-ip`, { headers: { 'x-forwarded-for': '203.0.113.9, 198.51.100.20' } })).json();
+    expect(r).toEqual({ ip: '198.51.100.20', via: 'x-forwarded-for (last entry)' });
+  });
+
   it('rejects malformed paths and never serves files outside the app', async () => {
     expect((await fetch(`${base}/%E0%A4%A`)).status).toBe(400);
     // An encoded slash survives URL normalization and decodes to ../ on the server.
@@ -224,5 +229,55 @@ describe('relay', () => {
     expect(plain.headers.get('strict-transport-security')).toBeNull();
     const viaHttpsProxy = await fetch(`${base}/`, { headers: { 'x-forwarded-proto': 'https' } });
     expect(viaHttpsProxy.headers.get('strict-transport-security')).toContain('max-age=');
+  });
+});
+
+describe('relay behind a platform edge (CLIENT_IP_HEADER, short stream lifetime)', () => {
+  let edge: ChildProcess;
+  let edgeBase: string;
+  let edgeData: string;
+
+  beforeAll(async () => {
+    const port = await freePort();
+    edgeData = mkdtempSync(join(tmpdir(), 'padmessage-edge-'));
+    edge = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'server/index.ts'], {
+      env: { ...process.env, PORT: String(port), DATA_DIR: edgeData, NODE_ENV: 'production', TRUST_PROXY: '', CLIENT_IP_HEADER: 'X-Real-IP', STREAM_MAX_SECONDS: '1' },
+      stdio: 'pipe',
+    });
+    edgeBase = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 100; i++) {
+      try {
+        if ((await fetch(`${edgeBase}/healthz`)).ok) return;
+      } catch {
+        /* not up yet */
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error('relay did not start');
+  });
+
+  afterAll(() => {
+    edge?.kill('SIGTERM');
+    rmSync(edgeData, { recursive: true, force: true });
+  });
+
+  it('takes the client address from the named header, ignoring X-Forwarded-For', async () => {
+    const r = await (await fetch(`${edgeBase}/api/client-ip`, { headers: { 'x-real-ip': '192.0.2.44', 'x-forwarded-for': '10.0.0.1' } })).json();
+    expect(r).toEqual({ ip: '192.0.2.44', via: 'x-real-ip' });
+  });
+
+  it('treats X-Forwarded-Proto as trusted, sending HSTS over HTTPS', async () => {
+    if (!existsSync('dist/index.html')) return;
+    const res = await fetch(`${edgeBase}/`, { headers: { 'x-forwarded-proto': 'https' } });
+    expect(res.headers.get('strict-transport-security')).toContain('max-age=');
+  });
+
+  it('closes streams after STREAM_MAX_SECONDS so browsers resume before proxy caps', async () => {
+    const res = await fetch(`${edgeBase}/api/events?chats=${CHAT}&after=0`);
+    const started = Date.now();
+    const text = await res.text(); // resolves when the server ends the stream
+    expect(text).toContain('retry: 1000');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 });

@@ -18,7 +18,8 @@ COPY --from=build /app/server/index.ts ./server/index.ts
 COPY --from=build /app/dist ./dist
 RUN mkdir -p /data && chown node:node /data
 USER node
-VOLUME /data
+# Mount persistent storage at /data (docker-compose and Railway volumes do).
+# No VOLUME instruction: Railway rejects it in Dockerfiles.
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=3s \
   CMD wget -q -O /dev/null "http://127.0.0.1:${PORT}/healthz" || wget -q --no-check-certificate -O /dev/null "https://127.0.0.1:${PORT}/healthz" || exit 1

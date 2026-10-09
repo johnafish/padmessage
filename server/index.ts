@@ -23,8 +23,17 @@ const DATA_DIR = resolve(env.DATA_DIR ?? 'data');
 const DIST_DIR = resolve(env.DIST_DIR ?? 'dist');
 const TLS_CERT = env.TLS_CERT;
 const TLS_KEY = env.TLS_KEY;
-/** Behind one reverse proxy, take the client address from the last X-Forwarded-For entry. */
+/** Behind one reverse proxy that appends to X-Forwarded-For (nginx, Caddy): use its last entry. */
 const TRUST_PROXY = env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true';
+/**
+ * Behind a platform edge that overwrites a client-address header (Railway
+ * sets X-Real-IP and X-Forwarded-For itself): name that header, and its first
+ * value is used. Check the result at /api/client-ip.
+ */
+const CLIENT_IP_HEADER = env.CLIENT_IP_HEADER?.toLowerCase() || undefined;
+const BEHIND_PROXY = TRUST_PROXY || !!CLIENT_IP_HEADER;
+/** Streams are closed and resumed this often, staying under proxies' request-duration caps. */
+const STREAM_MAX_MS = Number(env.STREAM_MAX_SECONDS ?? 240) * 1000;
 
 if (!TLS_CERT !== !TLS_KEY) throw new Error('Set both TLS_CERT and TLS_KEY, or neither.');
 const TLS = !!(TLS_CERT && TLS_KEY);
@@ -221,6 +230,10 @@ function header(req: IncomingMessage, name: string): string | undefined {
 }
 
 function clientIp(req: IncomingMessage): string {
+  if (CLIENT_IP_HEADER) {
+    const first = header(req, CLIENT_IP_HEADER)?.split(',')[0]?.trim();
+    if (first) return first;
+  }
   if (TRUST_PROXY) {
     // The proxy appends the address it saw, so the last entry is the one a
     // client can't forge (earlier entries are whatever the client sent).
@@ -231,7 +244,7 @@ function clientIp(req: IncomingMessage): string {
 }
 
 function isHttps(req: IncomingMessage): boolean {
-  return TLS || (TRUST_PROXY && header(req, 'x-forwarded-proto') === 'https');
+  return TLS || (BEHIND_PROXY && header(req, 'x-forwarded-proto') === 'https');
 }
 
 function intParam(v: string | null | undefined): number {
@@ -293,7 +306,7 @@ function openStream(req: IncomingMessage, res: ServerResponse, url: URL) {
   // Replay and join the rooms in one synchronous block: node:sqlite is
   // synchronous, so no message can be stored between the query and the join.
   const rows = replayStmt.all(JSON.stringify(chats), after, PAGE_LIMIT) as Row[];
-  let frames = 'retry: 3000\n\n' + rows.map((r) => eventFrame(toWire(r))).join('');
+  let frames = 'retry: 1000\n\n' + rows.map((r) => eventFrame(toWire(r))).join('');
   // Too far behind to replay in one go: the client pages the rest over GET.
   if (rows.length === PAGE_LIMIT) frames += 'event: resync\ndata: {}\n\n';
   res.write(frames);
@@ -306,8 +319,13 @@ function openStream(req: IncomingMessage, res: ServerResponse, url: URL) {
   streamsByIp.set(ip, open + 1);
   // Comment lines keep idle proxies and load balancers from closing the stream.
   const ping = setInterval(() => res.write(': ping\n\n'), STREAM_PING_MS);
+  // Many proxies cap how long one request may last (Railway: 15 minutes).
+  // Ending the stream ourselves first makes the browser reconnect after the
+  // retry hint and resume from Last-Event-ID, instead of hitting an error.
+  const recycle = STREAM_MAX_MS > 0 ? setTimeout(() => res.end(), STREAM_MAX_MS) : undefined;
   res.on('close', () => {
     clearInterval(ping);
+    clearTimeout(recycle);
     for (const chatId of chats) {
       const room = rooms.get(chatId);
       room?.delete(res);
@@ -422,6 +440,11 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
       return sendJson(res, 200, { ok: true });
     }
     if (url.pathname === '/api/events' && req.method === 'GET') return openStream(req, res, url);
+    if (url.pathname === '/api/client-ip' && req.method === 'GET') {
+      // The address rate limits use for the caller, so an operator can check
+      // TRUST_PROXY / CLIENT_IP_HEADER. Only ever reveals the caller's own address.
+      return sendJson(res, 200, { ip: clientIp(req), via: CLIENT_IP_HEADER ?? (TRUST_PROXY ? 'x-forwarded-for (last entry)' : 'socket') });
+    }
     if (url.pathname === '/api/latest' && req.method === 'GET') {
       // Each listed chat's newest message, for the conversation list.
       const latest = chatList(url.searchParams.get('chats'))
@@ -499,10 +522,10 @@ server.listen(PORT, HOST, () => {
   const where = `${TLS ? 'https' : 'http'}://${HOST ?? 'localhost'}:${PORT}`;
   console.log(`PadMessage relay listening on ${where}${PROD ? '' : ' (development: API only)'}`);
   if (PROD && !existsSync(join(DIST_DIR, 'index.html'))) console.warn(`No app build in ${DIST_DIR}. Run \`npm run build\` first.`);
-  if (PROD && !TLS && !TRUST_PROXY) {
+  if (PROD && !TLS && !BEHIND_PROXY) {
     console.warn(
       'Serving plain HTTP. Browsers only run PadMessage over HTTPS (localhost excepted): ' +
-        'put it behind a TLS proxy and set TRUST_PROXY=1, or set TLS_CERT and TLS_KEY.',
+        'put it behind a TLS proxy and set TRUST_PROXY=1 or CLIENT_IP_HEADER, or set TLS_CERT and TLS_KEY.',
     );
   }
 });
