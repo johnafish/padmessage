@@ -1566,3 +1566,14 @@ button {
     font-size: 16px;
   }
 }
+
+/* While a predicted keyboard is closing (viewport.ts), resize in step with
+   it: iOS keyboards animate for about 0.3 s on this curve. */
+.keyboard-moving :is(.app, .scrim) {
+  transition: height 0.32s cubic-bezier(0.38, 0.7, 0.125, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .keyboard-moving :is(.app, .scrim) {
+    transition: none;
+  }
+}
