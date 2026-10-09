@@ -5,11 +5,13 @@ import { getChat, listChats, markRead, onChatsChanged, type ChatRecord } from '.
 import { followChats, markSeen, onMessage, onResync } from './sync.ts';
 import { mountChat } from './ui/chat.ts';
 import { avatar, h, icon, installGlassPointer } from './ui/dom.ts';
+import { trackVisualViewport } from './ui/viewport.ts';
 import { previewOf, type Preview } from './ui/previews.ts';
 import { listTime } from './ui/time.ts';
 import { importPadSheet, newPadSheet } from './ui/sheets.ts';
 
 installGlassPointer();
+trackVisualViewport();
 
 const list = h('nav', { class: 'chat-list', 'aria-label': 'Chats' });
 const pane = h('main', { class: 'pane' });
@@ -207,7 +209,7 @@ function renderHome() {
       { class: 'center' },
       h(
         'div',
-        { class: 'hero glass glass--track' },
+        { class: 'hero glass' },
         h('div', { class: 'hero-orb glass glass--tinted' }, icon('shield')),
         h('h1', null, 'The messenger you can make provably unbreakable.'),
         h(
@@ -245,7 +247,7 @@ function renderLocked(chatId: string) {
       { class: 'center' },
       h(
         'div',
-        { class: 'hero glass glass--track' },
+        { class: 'hero glass' },
         h('button', { class: 'only-mobile btn btn--icon btn--sm glass glass--clear glass--pill glass--interactive sheet-close', 'aria-label': 'Back', onclick: () => go(null) }, icon('back')),
         h('div', { class: 'hero-orb glass glass--tinted' }, icon('lock')),
         h('h1', null, 'This chat is locked.'),

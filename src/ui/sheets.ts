@@ -16,6 +16,7 @@ import {
 import { addChat, getChat, isEntropyUsed, updateChat, type ChatRecord } from '../store.ts';
 import { download, formatBytes, h, icon, messagesLeft, SOURCE_INFO, sourceChip, toast } from './dom.ts';
 import { cameraSupported, collectCameraNoise, startCamera, stopCamera } from './webcam.ts';
+import { autofocusFields } from './viewport.ts';
 
 // ---------- sheet scaffolding ----------
 
@@ -317,7 +318,7 @@ export function newPadSheet(onDone: (chatId: string) => void) {
     h('div', { class: 'sheet-foot' }, generate),
   );
   sync();
-  name.input.focus();
+  if (autofocusFields()) name.input.focus();
 
   async function run() {
     if (collecting) {

@@ -15,7 +15,7 @@
  *   .glass--thick     heavy: modals, anything that needs legibility first
  *   .glass--tinted    accent-coloured material (sent bubbles, primary buttons)
  *   .glass--pill      fully rounded
- *   .glass--interactive  hover lift, pointer sheen, press squish
+ *   .glass--interactive  pointer-tracked sheen on hover, a gentle press
  */
 
 :root {
@@ -147,16 +147,14 @@
 .glass--interactive::after {
   opacity: 0.6;
 }
+/* Hover is deliberately quiet: no lift or scale, just a slightly brighter sheen. */
 @media (hover: hover) {
-  .glass--interactive:hover {
-    transform: translateY(-1px) scale(1.015);
-  }
   .glass--interactive:hover::after {
-    opacity: 1;
+    opacity: 0.8;
   }
 }
 .glass--interactive:active {
-  transform: scale(0.96);
+  transform: scale(0.97);
   transition-duration: 0.12s;
 }
 .glass--interactive:focus-visible {

@@ -15,6 +15,7 @@ import { deleteChat, getChat, getPad, PadExhaustedError, reserve } from '../stor
 import { avatar, formatBytes, h, icon, messagesLeft, sourceChip, toast } from './dom.ts';
 import { prepareImage, type ImageOption } from './images.ts';
 import { headerTime } from './time.ts';
+import { autofocusFields } from './viewport.ts';
 import { confirmSheet, exportPartnerCopy, renameSheet } from './sheets.ts';
 import { onMessage, onResync } from '../sync.ts';
 
@@ -74,7 +75,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
 
   const head = h(
     'header',
-    { class: 'chat-head glass glass--track' },
+    { class: 'chat-head glass' },
     h('button', { class: 'only-mobile btn btn--icon btn--sm glass glass--clear glass--pill glass--interactive', 'aria-label': 'Back', onclick: cb.onBack }, icon('back')),
     av,
     h(
@@ -114,15 +115,30 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   );
   const textarea = h('textarea', { rows: 1, placeholder: 'Message', maxlength: MAX_TEXT_CHARS, 'aria-label': 'Message' });
   const hint = h('span', { class: 'composer-hint', 'aria-live': 'polite' });
+  // Tapping send must not take focus from the text box, or the phone
+  // keyboard drops after every message; native messengers keep it up.
+  let typingWhenPressed = false;
   const sendBtn = h(
     'button',
-    { class: 'send glass glass--tinted glass--pill glass--interactive', 'aria-label': 'Send', disabled: true, onclick: () => void send() },
+    {
+      class: 'send glass glass--tinted glass--pill glass--interactive',
+      'aria-label': 'Send',
+      disabled: true,
+      onpointerdown: (e: PointerEvent) => {
+        typingWhenPressed = document.activeElement === textarea;
+        if (typingWhenPressed) e.preventDefault(); // keeps focus where it is
+      },
+      onclick: () => {
+        if (typingWhenPressed) textarea.focus(); // inside the tap, so phones allow it
+        void send();
+      },
+    },
     icon('send'),
   );
   const tray = h('div', { class: 'composer-tray', hidden: true });
   const composer = h(
     'div',
-    { class: 'composer glass glass--track' },
+    { class: 'composer glass' },
     tray,
     h('div', { class: 'composer-row' }, attachBtn, textarea, hint, sendBtn),
     fileInput,
@@ -134,11 +150,15 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   // The header and composer float over the list and change height (header
   // compaction, a multi-line draft, the attachment tray), so the list's
   // padding tracks them.
+  // Whether the user is reading the newest messages, tracked as they scroll,
+  // so a resize (the keyboard opening) keeps the bottom in view rather than
+  // judging "near the bottom" after the list has already shrunk.
+  let stuckToBottom = true;
+  list.addEventListener('scroll', () => (stuckToBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 120), { passive: true });
   const spacing = new ResizeObserver(() => {
-    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
     root.style.setProperty('--head-space', `${head.offsetTop + head.offsetHeight}px`);
     root.style.setProperty('--composer-space', `${root.clientHeight - composer.offsetTop}px`);
-    if (nearBottom) list.scrollTop = list.scrollHeight;
+    if (stuckToBottom) list.scrollTop = list.scrollHeight;
   });
   [root, head, composer].forEach((el) => spacing.observe(el));
 
@@ -212,7 +232,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     } finally {
       preparing = false;
       updateComposer();
-      textarea.focus();
+      if (autofocusFields()) textarea.focus();
     }
   }
 
@@ -239,7 +259,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
           onclick: () => {
             clearAttachment();
             updateComposer();
-            textarea.focus();
+            if (autofocusFields()) textarea.focus();
           },
         },
         icon('close'),
@@ -594,7 +614,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
   const status = h('div', { class: 'msg-status' });
 
   function draw(forceScroll = false) {
-    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+    const nearBottom = stuckToBottom;
     const ordered = [...items.values()].sort((a, b) => a.seq - b.seq || a.sentAt - b.sentAt);
     const lastMine = ordered.findLast((it) => it.mine);
     const desired: HTMLElement[] = [];
@@ -756,7 +776,7 @@ export async function mountChat(container: HTMLElement, chatId: string, cb: Chat
     draw(true);
   });
   await queue;
-  textarea.focus();
+  if (autofocusFields()) textarea.focus();
 
   return () => {
     stopMessages();

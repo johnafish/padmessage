@@ -68,12 +68,12 @@ export function icon(name: IconName): SVGSVGElement {
 }
 
 
-/** Pointer-tracked sheen for every .glass--interactive surface. */
+/** Pointer-tracked sheen for interactive glass (buttons, choices); large panels stay still. */
 export function installGlassPointer() {
   document.addEventListener(
     'pointermove',
     (e) => {
-      const el = (e.target as Element | null)?.closest?.<HTMLElement>('.glass--interactive, .glass--track');
+      const el = (e.target as Element | null)?.closest?.<HTMLElement>('.glass--interactive');
       if (!el) return;
       const r = el.getBoundingClientRect();
       el.style.setProperty('--mx', `${((e.clientX - r.left) / r.width) * 100}%`);

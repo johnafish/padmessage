@@ -68,12 +68,18 @@
 
 html {
   background: var(--bg);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 /* body stays transparent: an opaque body would paint over the z-index:-1 backdrop. */
 html,
 body {
   margin: 0;
   height: 100%;
+  /* The document never scrolls; the message list and sheets do. This also
+     stops the whole page rubber-banding on phones. */
+  overflow: hidden;
+  overscroll-behavior: none;
   color: var(--text);
   font-family: var(--font);
   font-size: 15px;
@@ -137,10 +143,15 @@ button {
 /* ---------- Layout ---------- */
 
 .app {
+  /* Sized to the visible area above any on-screen keyboard (viewport.ts). */
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vvtop, 0px);
+  height: var(--vvh, 100dvh);
   display: grid;
   grid-template-columns: clamp(248px, 30vw, 340px) minmax(0, 1fr);
   gap: 14px;
-  height: 100dvh;
   padding: 14px;
 }
 
@@ -867,6 +878,10 @@ button {
     right: 8px;
     bottom: max(8px, env(safe-area-inset-bottom));
   }
+  /* The keyboard covers the home indicator, so its safe-area gap goes too. */
+  .keyboard-open .composer {
+    bottom: 8px;
+  }
 }
 .composer-row {
   display: flex;
@@ -1048,7 +1063,10 @@ button {
 
 .scrim {
   position: fixed;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: var(--vvtop, 0px);
+  height: var(--vvh, 100%);
   z-index: 50;
   display: grid;
   place-items: center;
@@ -1069,7 +1087,7 @@ button {
 }
 .sheet {
   width: min(480px, 100%);
-  max-height: calc(100dvh - 32px);
+  max-height: calc(var(--vvh, 100dvh) - 32px);
   overflow-y: auto;
   padding: 26px;
   --glass-radius: 30px;
@@ -1305,9 +1323,9 @@ button {
 .toast {
   position: fixed;
   z-index: 100;
-  bottom: 24px;
+  top: calc(var(--vvtop, 0px) + var(--vvh, 100dvh) - 24px);
   left: 50%;
-  transform: translateX(-50%);
+  transform: translate(-50%, -100%);
   width: max-content;
   max-width: calc(100vw - 32px);
   text-align: center;
@@ -1319,7 +1337,7 @@ button {
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translate(-50%, 16px) scale(0.9);
+    transform: translate(-50%, calc(-100% + 16px)) scale(0.9);
   }
 }
 
@@ -1537,5 +1555,14 @@ button {
 @media (max-height: 640px) {
   .composer textarea {
     max-height: 96px;
+  }
+}
+
+/* iPhone Safari zooms into any text field set below 16px, and stays zoomed. */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
   }
 }
